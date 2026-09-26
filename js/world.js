@@ -309,7 +309,7 @@ export class World {
       v.yaw += ((((-f.trk * D2R - v.yaw) + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI) * (1 - Math.exp(-dt * 4));
       if (t - v.last > TRAIL_EVERY) { v.last = t; v.trail.push({ x: f.x, a: f.alt, z: f.z }); if (v.trail.length > TRAIL_N - 1) v.trail.shift(); }
       const emg = f.emg; if (emg) v.col.copy(COL.emg); else altColor(f.alt, v.col);
-      const dist = cam.distanceTo(v.pos), s = clamp(dist * 0.017, 0.05, 16) * (f.id === selId ? 1.35 : 1);
+      const dist = cam.distanceTo(v.pos), s = clamp(dist * (this.mode === 'ground' ? 0.008 : 0.017), 0.03, 16) * (f.id === selId ? 1.35 : 1);
       const pitch = clamp(Math.atan2(f.vr * this.altScale, f.spd + 1e-4) * 0.7, -0.22, 0.32), bank = clamp(-(f.turn || 0) * 0.14, -0.45, 0.45);
       this.tmpE.set(pitch, v.yaw, bank, 'YXZ'); this.tmpQ.setFromEuler(this.tmpE);
       this.tmpM.compose(v.pos, this.tmpQ, this.tmpS.setScalar(s)); this.planes.setMatrixAt(i, this.tmpM);
@@ -435,7 +435,7 @@ export class World {
     this.cloud.visible = this.cloudsOn; this.cloud.position.y = 1.8 * this.altScale - 0.2;
     this.cloud.material.uniforms.uTime.value = t;
     this.cloud.material.uniforms.uOpacity.value = this.mode === 'top' ? 0.35 : 0.9;
-    const pk = (t * 0.5) % 1; this.pulse.scale.setScalar(0.5 + pk * 6); this.pulse.material.opacity = 0.7 * (1 - pk); this.obs.visible = this.mode !== 'ground';
+    const pk = (t * 0.5) % 1; this.pulse.scale.setScalar(0.5 + pk * 6); this.pulse.material.opacity = 0.7 * (1 - pk); this.obs.visible = this.drops.visible = this.mode !== 'ground';
     const bf = this.baseFog || 0.0032, fd = this.mode === 'ground' ? Math.max(bf * 3, 0.009) : bf * clamp(110 / this.curPos.distanceTo(this.curLook), 0.2, 1);
     this.scene.fog.density += (fd - this.scene.fog.density) * (1 - Math.exp(-dt * 3));
     const ps = clamp(this.curPos.length() * 0.012, 0.3, 4); this.pin.scale.setScalar(ps); this.pin.visible = this.mode !== 'ground';

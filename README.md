@@ -2,7 +2,9 @@
 
 **The sky above you, live in 3D.** Squawk is a plane-spotting app that shows every aircraft around you, in real time, over satellite imagery. The sun sits where it really is right now, and the clouds follow the live weather. Tap any aircraft and Squawk tells you exactly where to look to see it with your own eyes.
 
-![Squawk](assets/screenshot.jpg)
+![Squawk over Ireland](assets/wide.jpg)
+
+<p><img src="assets/orbit.jpg" width="49%" alt="Orbit view over Dublin"> <img src="assets/ground.jpg" width="49%" alt="Ground view looking up at aircraft"></p>
 
 ## Features
 
