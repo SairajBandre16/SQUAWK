@@ -19,6 +19,8 @@ import { D2R, EARTH_R, clamp, lerp, smooth, curvDrop, sunPosition, unitDir, enu,
 export { TILE_STYLES };
 const MAXP = 9000, TRAIL_F = 500, TRAIL_N = 80, TRAIL_EVERY = 1.0;
 export const HOME_R = 95, SPACE_R = 22000;
+// zoomed in closer than this, a left-drag orbits the camera in 3D; further out it pans the globe
+const ORBIT_R = 700;
 export const RINGS = [10, 25, 50, 100, 150];
 export const COL = {
   low: new THREE.Color('#FF9F1C'), mid: new THREE.Color('#FF3D8B'), high: new THREE.Color('#29C5FF'),
@@ -442,15 +444,18 @@ export class World {
     c.r = r1;
   }
 
-  /* ---------- input: drag moves the map, right-drag (or shift/ctrl-drag, or two fingers) turns and tilts ---------- */
+  /* ---------- input ----------
+     Zoomed in (orbit view): drag orbits and tilts, right-drag (or shift/ctrl/alt-drag) pans, two fingers pinch, twist and pan.
+     Zoomed out, or in map view: drag pans, right-drag turns (and tilts in orbit view). */
   bindInput() {
     const el = this.canvas, ptrs = new Map(); let drag = null, two = null;
-    const gesture = () => { const [a, b] = [...ptrs.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x), my: (a.y + b.y) / 2 }; };
+    const gesture = () => { const [a, b] = [...ptrs.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 }; };
     const touch = () => { this.lastInteract = this.clock.elapsedTime; this.fly = null; this.onInteract && this.onInteract(); };
     el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerdown', e => {
       el.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }); this.inertia = null;
-      if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, moved: 0, rot: e.button === 2 || e.button === 1 || e.shiftKey || e.ctrlKey || e.altKey, vx: 0, vy: 0, t: performance.now() };
+      const alt = e.button === 2 || e.button === 1 || e.shiftKey || e.ctrlKey || e.altKey;
+      if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, moved: 0, rot: this.orbitDrag() ? !alt : alt, vx: 0, vy: 0, t: performance.now() };
       if (ptrs.size === 2) { two = gesture(); drag = null; }
       touch();
     });
@@ -459,7 +464,7 @@ export class World {
       const c = this.cam;
       if (ptrs.size === 2 && two) {
         const g = gesture(); this.zoom(two.d / g.d);
-        if (this.mode !== 'ground') { c.theta += ((g.a - two.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI; if (this.mode === 'orbit') c.phi = clamp(c.phi - (g.my - two.my) * 0.004, 0, 1.45); }
+        if (this.mode !== 'ground') { c.theta += ((g.a - two.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI; if (!this.fol) this.pan(g.mx - two.mx, g.my - two.my); }
         two = g; touch(); return;
       }
       if (!drag) return;
@@ -487,6 +492,7 @@ export class World {
       const hit = this.groundAt(e.clientX, e.clientY); if (hit) this.flyTo(hit.lat, hit.lon, Math.max(1, this.cam.r * 0.35), { dur: 0.9 });
     });
   }
+  orbitDrag() { return this.mode === 'orbit' && (this.fol ? Math.min(this.cam.r, 30) : this.cam.r) < ORBIT_R; }
   resize(w, h) {
     this.w = w; this.h = h;
     this.renderer.setSize(w, h, false); this.composer.setSize(w, h);

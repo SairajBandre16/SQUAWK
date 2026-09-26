@@ -10,11 +10,11 @@
 
 - **A whole live planet.** Squawk opens in space and drops down to you. Zoom out, or tap **Globe**, to spin the earth and watch live traffic across continents. Satellite tiles stream in as you zoom, with borders, place names and city lights on the night side.
 - **Live aircraft** from community ADS-B networks (ADSB.lol, airplanes.live and adsb.fi). Around you it refreshes every 5 seconds; look somewhere else and the feed follows the camera, with a wider radius the further out you zoom.
-- **Recentre anywhere.** Wherever you've wandered, *Back to home*, the ⌖ button or the **H** key flies you straight back.
+- **Recentre anywhere.** Wherever you've wandered, the orange ⌖ button next to the HUD (or the one by the zoom buttons, or the **H** key) flies you straight back.
 - **Use your current location**, search any city or airport, or jump to a busy sky: Heathrow, Dubai, Mumbai, New York and more.
 - **A real-world scene.** Satellite ground imagery with earth curvature. The sun's position is calculated for your location and time. Cloud cover, wind and haze come from live weather.
 - **Camera views.** *Orbit* is the 3D overview. *Map* is top-down. *Globe* pulls out to see the planet. *Ground view* puts you on the ground looking up at true angles, so the scene matches what you see outside.
-- **Controls.** Drag to move, scroll or pinch to zoom, right-drag (or two fingers) to turn and tilt, double-click to zoom in on a spot.
+- **Controls.** Zoomed in, drag to orbit and tilt in 3D and right-drag (or two fingers) to move. Zoomed out, drag spins the globe and right-drag turns it. Scroll or pinch to zoom, double-click to zoom in on a spot.
 - **Look ahead.** A countdown to the next plane passing over you, and alerts (with an optional chime and system notification) for overhead passes, rare aircraft and new types.
 - **Sun and moon transits.** Squawk predicts aircraft crossing the sun or moon and draws the line on the ground from which the crossing is dead centre, so you know how far to walk.
 - **Contrail forecast** from upper-air temperature and humidity: which planes should leave a trail, and whether it will linger. They leave white trails in the 3D view.

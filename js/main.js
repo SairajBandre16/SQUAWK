@@ -386,7 +386,8 @@ function followView() {
 // On the first load the camera starts in space above home; later moves fly there.
 function setPlace(p, boot) {
   settings.place = { name: p.name, lat: p.lat, lon: p.lon }; saveSettings();
-  S.proj = new Proj(p.lat, p.lon); $('placeName').textContent = p.name; $('recenterName').textContent = p.name.split(',')[0];
+  S.proj = new Proj(p.lat, p.lon); $('placeName').textContent = p.name;
+  const back = 'Back to ' + p.name.split(',')[0]; $('recenterBtn').dataset.tip = back; $('recenterBtn').setAttribute('aria-label', back + ' (H)');
   world.setHome(p.lat, p.lon); world.setAirports(D.AIRPORTS, S.proj);
   if (boot) world.flyTo(p.lat, p.lon, SPACE_R, { instant: true, theta: 0, phi: 0 });
   else { if (S.view === 'ground') setView('orbit'); world.flyTo(p.lat, p.lon, HOME_R, S.view === 'top' ? { theta: 0, phi: 0.02 } : { theta: 0.6, phi: 1.02 }); }
@@ -952,8 +953,8 @@ function inRange() {
 }
 function updateExplore() {
   const d = world.homeDist(), away = S.view !== 'ground' && (d > 40 || world.cam.r > 2500) && !(world.fly && world.fly.b.r === HOME_R && haversine(world.fly.b.lat, world.fly.b.lon, S.proj.lat0, S.proj.lon0) < 1);
-  $('explore').hidden = !away;
-  if (away) $('exploreT').textContent = `${d < 40 ? 'Zoomed out' : Math.round(d).toLocaleString('en') + ' km from home'} · ${S.flights.size.toLocaleString('en')} aircraft tracked`;
+  $('recenterBtn').hidden = !away;
+  if (away) $('recenterBtn').title = `${$('recenterBtn').dataset.tip} · ${d < 40 ? 'zoomed out' : Math.round(d).toLocaleString('en') + ' km away'} (H)`;
   paintView();
 }
 // the next plane to pass within a few km of you, counting down
@@ -985,7 +986,7 @@ function updateHUD() {
 function showHint() {
   if (store.get('squawk.hint', false)) return;
   const touch = matchMedia('(pointer: coarse)').matches, el = $('hint');
-  el.textContent = touch ? 'Drag to move · Pinch to zoom · Twist or two-finger drag to turn and tilt' : 'Drag to move · Scroll to zoom · Right-drag to turn and tilt · Press H to come home';
+  el.textContent = touch ? 'Drag to orbit · Pinch to zoom · Two fingers to move and turn · Zoom out and drag to spin the globe' : 'Drag to orbit · Right-drag to move · Scroll to zoom · Zoom out and drag to spin the globe · H to come home';
   setTimeout(() => { el.hidden = false; setTimeout(() => { el.hidden = true; }, 7000); }, 4500);
   store.set('squawk.hint', true);
 }
