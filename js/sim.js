@@ -118,6 +118,7 @@ export class Sim {
       this.timers[k] -= dt;
       if (counts[k] < this.target[k] && this.timers[k] <= 0) { this.spawn(k, false, res.spawned); this.timers[k] = k === 'over' ? rnd(4, 12) : rnd(20, 45); }
     }
+    for (const f of res.spawned) { const ll = this.proj.toLL(f.x, f.z); f.lat = ll.lat; f.lon = ll.lon; }
     return res;
   }
   initial() {

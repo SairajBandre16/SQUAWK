@@ -35,6 +35,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def end_headers(self):
+        # always revalidate, so edited modules are picked up on a plain reload
+        if not self.path.startswith('/api/'):
+            self.send_header('Cache-Control', 'no-cache')
+        super().end_headers()
+
     def log_message(self, fmt, *args):
         if not self.path.startswith('/api/'):
             super().log_message(fmt, *args)

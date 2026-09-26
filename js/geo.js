@@ -55,14 +55,43 @@ export const P16L = ['north', 'north-northeast', 'northeast', 'east-northeast', 
   'south', 'south-southwest', 'southwest', 'west-southwest', 'west', 'west-northwest', 'northwest', 'north-northwest'];
 export const pt16 = b => Math.round((((b % 360) + 360) % 360) / 22.5) % 16;
 
-/** Position of an aircraft relative to an observer at the origin: ground distance, bearing, elevation angle. */
-export function relative(f) {
-  const d = Math.hypot(f.x, f.z);
-  const brg = (Math.atan2(f.x, -f.z) * R2D + 360) % 360;
-  // elevation corrected for earth curvature
-  const drop = curvDrop(f.x, f.z);
-  const elev = Math.atan2(f.alt - drop, Math.max(d, 0.01)) * R2D;
-  return { d, brg, elev, slant: Math.hypot(d, f.alt) };
+/** Initial great-circle bearing from point 1 to point 2, degrees. */
+export function bearing(lat1, lon1, lat2, lon2) {
+  const p1 = lat1 * D2R, p2 = lat2 * D2R, dl = (lon2 - lon1) * D2R;
+  return (Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) * R2D + 360) % 360;
+}
+
+/** Position of an aircraft relative to an observer o ({lat0, lon0}): ground distance, bearing, elevation angle, slant range. Exact on a spherical earth. */
+export function relative(f, o) {
+  const d = haversine(o.lat0, o.lon0, f.lat, f.lon), th = d / EARTH_R, rh = EARTH_R + f.alt;
+  const brg = bearing(o.lat0, o.lon0, f.lat, f.lon);
+  const elev = Math.atan2(rh * Math.cos(th) - EARTH_R, Math.max(rh * Math.sin(th), 1e-5)) * R2D;
+  return { d, brg, elev, slant: Math.sqrt(Math.max(0, rh * rh + EARTH_R * EARTH_R - 2 * EARTH_R * rh * Math.cos(th))) };
+}
+
+/** Move a lat/lon point dist km along track trk (degrees). Flat step, fine for the short hops of dead reckoning. */
+export function step(p, trk, dist) {
+  p.lat = clamp(p.lat + dist * Math.cos(trk * D2R) / 111.195, -89.9, 89.9);
+  p.lon += dist * Math.sin(trk * D2R) / (111.195 * Math.max(0.01, Math.cos(p.lat * D2R)));
+  if (p.lon > 180) p.lon -= 360; else if (p.lon < -180) p.lon += 360;
+  return p;
+}
+
+/* Earth-centred frame used by the globe (km). +y = north pole, +z = lat 0 / lon 0, +x = lat 0 / lon 90E. */
+export function unitDir(lat, lon, out) {
+  const p = lat * D2R, l = lon * D2R, c = Math.cos(p);
+  out.x = c * Math.sin(l); out.y = Math.sin(p); out.z = c * Math.cos(l); return out;
+}
+/** Local east / north / up unit vectors at lat, lon (each written into e, n, u). */
+export function enu(lat, lon, e, n, u) {
+  const p = lat * D2R, l = lon * D2R, sp = Math.sin(p), cp = Math.cos(p), sl = Math.sin(l), cl = Math.cos(l);
+  e.x = cl; e.y = 0; e.z = -sl;
+  n.x = -sp * sl; n.y = cp; n.z = -sp * cl;
+  if (u) { u.x = cp * sl; u.y = sp; u.z = cp * cl; }
+}
+export function toLatLon(x, y, z) {
+  const r = Math.hypot(x, y, z) || 1;
+  return { lat: Math.asin(clamp(y / r, -1, 1)) * R2D, lon: Math.atan2(x, z) * R2D, h: r - EARTH_R };
 }
 
 export const dirVec = h => ({ x: Math.sin(h * D2R), z: -Math.cos(h * D2R) });

@@ -1,21 +1,21 @@
 import * as THREE from 'three';
-import { World, RINGS, altColor, TILE_STYLES } from './world.js';
+import { World, RINGS, altColor, TILE_STYLES, HOME_R, SPACE_R } from './world.js';
 import * as D from './data.js';
 import { Sim } from './sim.js';
-import { Proj, relative, P16, P16L, pt16, clamp, haversine, curvDrop } from './geo.js';
+import { Proj, relative, P16, P16L, pt16, clamp, haversine, curvDrop, step } from './geo.js';
 
 const $ = id => document.getElementById(id);
-const RANGE = 190, FEED_NM = 100, POLL_MS = 5000;
+const IN_RANGE = 185, FEED_NM = 100, POLL_MS = 5000;
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 };
-const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', relay: '' }, store.get('squawk.settings', {}));
+const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', names: true, relay: '' }, store.get('squawk.settings', {}));
 { const q = new URLSearchParams(location.search).get('relay'); if (q) settings.relay = q; }
 D.feedConfig.relayUrl = settings.relay;
 const saveSettings = () => store.set('squawk.settings', settings);
 const S = { flights: new Map(), mode: 'boot', provider: '', selId: null, follow: false, tab: 'sky', view: 'orbit', weather: null, timeOff: 0,
-  events: [], history: [], rec: {}, booting: false, proj: null, sim: null };
+  events: [], history: [], rec: {}, booting: false, quiet: false, feedResolved: false, region: null, proj: null, sim: null };
 const hexOf = c => '#' + c.getHexString();
 const tmpC = new THREE.Color();
 const fmtAlt = km => { const ft = km * 3280.84; return ft >= 5000 ? 'FL' + String(Math.round(ft / 100)).padStart(3, '0') : (Math.round(ft / 100) * 100).toLocaleString('en') + ' ft'; };
@@ -23,6 +23,7 @@ const boardAlt = km => { const ft = km * 3280.84; return ft >= 5000 ? 'FL' + Str
 const kt = f => Math.round(f.spd * 1943.84);
 const fpm = f => Math.round(f.vr * 196850 / 50) * 50;
 const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
+const rel = f => relative(f, S.proj);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ---------------- boot ---------------- */
@@ -63,7 +64,7 @@ const BADGES = [
 ];
 function award(id) {
   const lg = theLog(); if (lg.badges[id]) return; lg.badges[id] = Date.now(); if (lg === logLive) saveLog();
-  if (S.booting) return;
+  if (S.booting || S.quiet) return;
   const b = BADGES.find(x => x.id === id); const el = $('badgeToast');
   el.innerHTML = `<span class="star">${ICON_STAR}</span><span>Badge unlocked: <b>${esc(b.name)}</b></span>`; el.hidden = false;
   clearTimeout(award.t); award.t = setTimeout(() => { el.hidden = true; }, 4200);
@@ -95,25 +96,30 @@ function pushEvent(k, text) {
 }
 
 /* ---------------- flights ---------------- */
+// The feed can hold thousands of aircraft from around the world. Only the ones that come within IN_RANGE of you
+// count as catches for the log, badges and events.
 function addFlight(f) {
-  f.id = f.id || f.hex; f.phase = Math.random() * 3; f.emg = D.isEmergency(f);
-  S.flights.set(f.id, f); logCatch(f);
-  if (!S.booting && D.HEAVY.has(f.type)) pushEvent('heavy', `${f.callsign}, a ${D.typeName(f)}, is in range at ${fmtAlt(f.alt)}`);
+  f.id = f.id || f.hex; f.phase = Math.random() * 3; f.emg = D.isEmergency(f); f.quiet = S.booting;
+  S.flights.set(f.id, f);
   if (f.emg) emergency(f);
 }
-function emergency(f) { pushEvent('emg', `${f.callsign} is squawking ${f.squawk}`); if (f.squawk === '7700') award('mayday'); }
+function catchFlight(f) {
+  f.caught = true; S.quiet = f.quiet; logCatch(f); S.quiet = false;
+  if (!f.quiet && D.HEAVY.has(f.type)) pushEvent('heavy', `${f.callsign}, a ${D.typeName(f)}, is in range at ${fmtAlt(f.alt)}`);
+}
+function emergency(f) { if (rel(f).d > IN_RANGE * 4) return; pushEvent('emg', `${f.callsign} is squawking ${f.squawk}`); if (f.squawk === '7700') award('mayday'); }
 function removeFlight(id) { S.flights.delete(id); if (S.selId === id) select(null); }
 function clearFlights() { S.flights.clear(); world.resetAircraft(); select(null); }
 
+const staleAfter = () => Math.max(40, (S.region?.ms || POLL_MS) / 1000 * 2.5);
 function ingest(list) {
   const now = performance.now() / 1000;
   for (const a of list) {
     if (a.lat == null || a.lon == null || a.alt_baro === 'ground') continue;
     const ft = typeof a.alt_baro === 'number' ? a.alt_baro : (typeof a.alt_geom === 'number' ? a.alt_geom : null);
     if (ft == null) continue;
-    const p = S.proj.toXZ(a.lat, a.lon); if (Math.hypot(p.x, p.z) > RANGE) continue;
     const id = 'h' + a.hex, cs = (a.flight || '').trim();
-    const d = { hex: a.hex, x: p.x, z: p.z, lat: a.lat, lon: a.lon, alt: Math.max(0, ft * 0.0003048), spd: (a.gs || 0) * 0.000514444,
+    const d = { hex: a.hex, lat: a.lat, lon: a.lon, alt: Math.max(0, ft * 0.0003048), spd: (a.gs || 0) * 0.000514444,
       vr: (a.baro_rate ?? a.geom_rate ?? 0) * 0.00000508, squawk: a.squawk || '', type: a.t || '', desc: a.desc || '', reg: a.r || '',
       cat: a.category || '', callsign: cs || a.r || String(a.hex).toUpperCase(), lastFix: now, kind: 'live' };
     const trk = a.track ?? a.true_heading ?? a.mag_heading;
@@ -121,13 +127,13 @@ function ingest(list) {
     if (!f) addFlight({ id, trk: trk ?? 0, turn: 0, ...d });
     else { const was = f.emg; Object.assign(f, d); if (trk != null) f.trk = trk; f.emg = D.isEmergency(f); if (f.emg && !was) emergency(f); }
   }
-  for (const [id, f] of S.flights) if (now - f.lastFix > 40) removeFlight(id);
+  const stale = staleAfter(); for (const [id, f] of S.flights) if (now - f.lastFix > stale) removeFlight(id);
 }
 function reckon(dt) {
-  const now = performance.now() / 1000;
+  const now = performance.now() / 1000, lim = staleAfter() * 0.6;
   for (const f of S.flights.values()) {
-    if (now - f.lastFix > 20) continue;
-    f.x += f.spd * Math.sin(f.trk * Math.PI / 180) * dt; f.z -= f.spd * Math.cos(f.trk * Math.PI / 180) * dt; f.alt = Math.max(0, f.alt + f.vr * dt);
+    if (now - f.lastFix > lim) continue;
+    step(f, f.trk, f.spd * dt); f.alt = Math.max(0, f.alt + f.vr * dt);
   }
 }
 function simStep(dt) {
@@ -138,10 +144,20 @@ function simStep(dt) {
 }
 
 /* ---------------- feed ---------------- */
-let feedGen = 0, pollT = null, fails = 0;
+// The feed follows the camera. Looking at home it asks for 100 nm around you every 5 s. Look somewhere else and it
+// asks around that spot instead, with a wider radius and a slower refresh the further out you zoom.
+let feedGen = 0, pollT = null, fails = 0, inflight = false, lastReq = 0;
+function region() {
+  const f = world.focus(), vr = world.viewRadius(), home = S.proj;
+  if (haversine(home.lat0, home.lon0, f.lat, f.lon) < 120 && vr < 260) return { lat: home.lat0, lon: home.lon0, nm: FEED_NM, ms: POLL_MS, home: true };
+  const nm = [100, 250, 500, 1000, 2000, 3500].find(n => n * 1.852 >= vr) || 3500;
+  return { lat: +f.lat.toFixed(2), lon: +f.lon.toFixed(2), nm, ms: nm <= 250 ? 5000 : nm <= 1000 ? 10000 : 30000 };
+}
+const regionMoved = (a, b) => !a || a.nm !== b.nm || haversine(a.lat, a.lon, b.lat, b.lon) > a.nm * 1.852 * 0.3;
 function setFeed(mode, label) {
   $('feedChip').dataset.mode = mode; $('feedLabel').textContent = label;
-  $('feedNote').textContent = mode === 'live' ? `Receiving live positions from ${S.provider}, refreshed every 5 seconds.`
+  const every = S.region ? S.region.ms / 1000 : 5;
+  $('feedNote').textContent = mode === 'live' ? `Receiving live positions from ${S.provider}, refreshed every ${every} seconds. ${S.region && !S.region.home ? `Showing up to ${S.region.nm.toLocaleString('en')} nm around the spot you're looking at.` : ''}`
     : mode === 'sim' ? 'The flight-tracking networks block direct requests from this site, so you are watching realistic simulated traffic. Host Squawk on Vercel or Netlify (the included config relays the feed), or paste a relay URL below. The README has the two-minute setup.'
     : 'Connecting to the flight-tracking networks.';
 }
@@ -151,31 +167,43 @@ function startSim() {
   for (let i = 0; i < 30; i++) simStep(1);
   S.booting = false; setFeed('sim', 'Simulated sky');
 }
-async function poll(gen, first) {
+async function poll(gen) {
   if (gen !== feedGen) return;
+  clearTimeout(pollT); inflight = true; lastReq = performance.now();
+  const reg = S.region = region();
+  let wait = reg.ms;
   try {
-    const { list, provider } = await D.fetchAircraft(S.proj.lat0, S.proj.lon0, FEED_NM);
+    const { list, provider } = await D.fetchAircraft(reg.lat, reg.lon, reg.nm);
     if (gen !== feedGen) return;
     if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; S.booting = true; ingest(list); S.booting = false; }
     else ingest(list);
     S.provider = provider; fails = 0; setFeed('live', 'Live · ' + provider);
-    pollT = setTimeout(() => poll(gen), POLL_MS);
   } catch (e) {
     if (gen !== feedGen) return;
-    fails++;
-    if (S.mode !== 'sim' && (first || fails >= 3)) startSim();
-    pollT = setTimeout(() => poll(gen), S.mode === 'sim' ? 60000 : POLL_MS);
+    if (e.rate && S.mode === 'live') wait = 15000;
+    else { fails++; if (S.mode !== 'sim' && (S.mode === 'boot' || fails >= 3)) startSim(); }
+    if (S.mode === 'sim') wait = 60000;
+  } finally {
+    if (gen === feedGen) { inflight = false; S.feedResolved = true; pollT = setTimeout(() => poll(gen), wait); }
   }
-  S.feedResolved = true;
 }
-function restartFeed() { feedGen++; clearTimeout(pollT); S.mode = 'boot'; S.feedResolved = false; setFeed('boot', 'Connecting'); poll(feedGen, true); }
+function restartFeed() { feedGen++; clearTimeout(pollT); inflight = false; S.mode = 'boot'; S.region = null; S.feedResolved = false; setFeed('boot', 'Connecting'); poll(feedGen); }
+// Called once a second: when the view has moved to a new area, ask for it now instead of waiting for the next poll.
+function followView() {
+  if (S.mode !== 'live' || inflight || world.fly || performance.now() - lastReq < 2500) return;
+  if (regionMoved(S.region, region())) poll(feedGen);
+}
 
 /* ---------------- place ---------------- */
-function setPlace(p) {
+// "Home" is where you stand: the pin, range rings, ground view, weather, log and badges all belong to it.
+// On the first load the camera starts in space above home; later moves fly there.
+function setPlace(p, boot) {
   settings.place = { name: p.name, lat: p.lat, lon: p.lon }; saveSettings();
-  S.proj = new Proj(p.lat, p.lon); $('placeName').textContent = p.name;
-  world.loadTiles(S.proj, settings.style); world.setAirports(D.AIRPORTS, S.proj);
-  clearFlights(); world.cam.target.set(0, 2, 0); S.follow = false;
+  S.proj = new Proj(p.lat, p.lon); $('placeName').textContent = p.name; $('recenterName').textContent = p.name.split(',')[0];
+  world.setHome(p.lat, p.lon); world.setAirports(D.AIRPORTS, S.proj);
+  if (boot) world.flyTo(p.lat, p.lon, SPACE_R, { instant: true, theta: 0, phi: 0 });
+  else { if (S.view === 'ground') setView('orbit'); world.flyTo(p.lat, p.lon, HOME_R, S.view === 'top' ? { theta: 0, phi: 0.02 } : { theta: 0.6, phi: 1.02 }); }
+  clearFlights(); S.follow = false;
   S.sim = new Sim(S.proj); S.history = []; S.rec = {};
   buildPlaceLabels(); S.weather = null; loadWeather(); updateSun();
   restartFeed();
@@ -193,7 +221,7 @@ setInterval(() => S.proj && loadWeather(), 15 * 60e3);
 function updateSun() {
   if (!S.proj) return;
   const d = new Date(Date.now() + S.timeOff * 3600e3);
-  world.setSun(d, S.proj.lat0, S.proj.lon0);
+  world.setSun(d);
   document.documentElement.dataset.sky = world.day > 0.45 ? 'day' : 'night';
   const off = S.weather?.utcOffset;
   const loc = off != null ? new Date(d.getTime() + off * 1000) : d;
@@ -220,8 +248,8 @@ function buildPlaceLabels() {
 }
 function updateLabels(arr) {
   const max = settings.labels === 'all' ? 150 : settings.labels === 'nearby' ? 24 : 0;
-  const cam = world.camera.position, cand = [];
-  for (const f of arr) { const v = world.vis.get(f.id); if (v) cand.push([f, v, v.pos.distanceToSquared(cam)]); }
+  const cam = world.camera.position, cand = [], lim = S.view === 'ground' ? Infinity : world.cam.r > 1500 ? 0 : (world.cam.r * 2.5 + 80) ** 2;
+  if (max) for (const f of lim ? arr : S.selId && S.flights.has(S.selId) ? [S.flights.get(S.selId)] : []) { const v = world.vis.get(f.id); if (v) { const d = v.pos.distanceToSquared(cam); if (d < lim || f.id === S.selId) cand.push([f, v, d]); } }
   cand.sort((a, b) => a[2] - b[2]);
   const sel = S.selId && cand.findIndex(c => c[0].id === S.selId);
   if (sel > 0) cand.unshift(cand.splice(sel, 1)[0]);
@@ -244,9 +272,10 @@ function updateLabels(arr) {
     el.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`; el.hidden = false;
   }
   for (let i = n; i < pool.length; i++) if (!pool[i].hidden) pool[i].hidden = true;
+  const far = world.cam.r > 1500 && S.view !== 'ground';
   for (const p of placeLbls) {
-    world.project(p.pos, P);
-    const show = P.vis && !(p.cls === 'ring' && S.view === 'ground');
+    world.projectHome(p.pos, P);
+    const show = P.vis && !(p.cls === 'ring' && S.view === 'ground') && !(far && p.cls !== 'you');
     p.el.hidden = !show; if (show) p.el.style.transform = `translate(${P.x.toFixed(1)}px,${P.y.toFixed(1)}px) translate(-50%,-50%)`;
   }
 }
@@ -294,7 +323,7 @@ function phase(f) {
 const routeOf = f => f.kind !== 'live' ? f.route : D.getRoute(f.callsign);
 function updateCard() {
   const f = S.flights.get(S.selId); if (!f) return;
-  const r = relative(f);
+  const r = rel(f);
   $('cAirline').textContent = D.airlineName(f.callsign) || D.getRoute(f.callsign)?.airline || (f.kind === 'live' ? 'Operator unknown' : '');
   $('cCall').textContent = f.callsign; $('cType').textContent = D.typeName(f);
   $('cHeavy').hidden = !D.HEAVY.has(f.type);
@@ -309,8 +338,9 @@ function updateCard() {
     $('cProg').style.width = prog + '%'; $('cPlaneIco').style.left = prog + '%';
   }
   const p = pt16(r.brg);
-  $('cLook').textContent = r.elev < 0.5 ? `${cap(P16L[p])}, below your horizon` : `${cap(P16L[p])}, ${Math.round(r.elev)}° up`;
-  $('cDist').textContent = `${r.d < 10 ? r.d.toFixed(1) : Math.round(r.d)} km away · bearing ${String(Math.round(r.brg)).padStart(3, '0')}°`;
+  const home = settings.place.name.split(',')[0];
+  $('cLook').textContent = r.d > 600 ? `Too far to see from ${home}` : r.elev < 0.5 ? `${cap(P16L[p])}, below your horizon` : `${cap(P16L[p])}, ${Math.round(r.elev)}° up`;
+  $('cDist').textContent = `${r.d < 10 ? r.d.toFixed(1) : Math.round(r.d).toLocaleString('en')} km ${r.d > 600 ? 'from ' + home : 'away'} · bearing ${String(Math.round(r.brg)).padStart(3, '0')}°`;
   $('cAlt').textContent = `${fmtAlt(f.alt)} · ${Math.round(f.alt * 1000).toLocaleString('en')} m`;
   $('cSpd').textContent = `${kt(f)} kt · ${Math.round(f.spd * 3600)} km/h`;
   $('cTrk').textContent = String(Math.round(f.trk)).padStart(3, '0') + '° ' + P16[pt16(f.trk)];
@@ -325,17 +355,25 @@ function setFollow(on) {
 }
 $('cClose').onclick = () => select(null);
 $('cFollow').onclick = () => setFollow(!S.follow);
-$('cGround').onclick = () => { const f = S.flights.get(S.selId); if (!f) return; setFollow(false); setView('ground'); world.lookAtFlight(f); };
+$('cGround').onclick = () => { const f = S.flights.get(S.selId); if (!f) return; setFollow(false); setView('ground'); world.lookAtRel(rel(f)); };
+world.onUnfollow = () => setFollow(false);
 
 /* ---------------- view, zoom, time ---------------- */
 function setView(v) {
+  if (v === 'globe') { if (S.view === 'ground') setView('orbit'); setFollow(false); const f = world.focus(); world.flyTo(f.lat, f.lon, 16000, { phi: 0 }); paintView(); return; }
   S.view = v; world.setMode(v);
-  document.querySelectorAll('#viewSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === v)));
   if (v !== 'orbit') { S.follow = false; $('cFollow').setAttribute('aria-pressed', 'false'); $('cFollow').textContent = 'Follow'; }
+  paintView();
+}
+// "Globe" isn't a camera mode, it's orbit or map zoomed out far enough to see the planet
+function paintView() {
+  const globe = S.view !== 'ground' && (world.fly ? world.fly.b.r : world.cam.r) > 6000;
+  document.querySelectorAll('#viewSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === 'globe' ? globe : b.dataset.v === S.view && !globe)));
 }
 document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => setView(b.dataset.v));
 $('zIn').onclick = () => world.zoom(0.75); $('zOut').onclick = () => world.zoom(1.33);
-$('zHome').onclick = () => { setFollow(false); world.cam.target.set(0, 2, 0); world.cam.r = 95; if (S.view === 'ground') { world.cam.yaw = 0; world.cam.pitch = 0.4; } };
+function recenter() { setFollow(false); world.recenter(); }
+$('zHome').onclick = recenter; $('recenterBtn').onclick = recenter;
 $('timeR').oninput = e => { S.timeOff = +e.target.value; $('liveBtn').setAttribute('aria-pressed', String(S.timeOff === 0)); updateSun(); };
 $('liveBtn').onclick = () => { S.timeOff = 0; $('timeR').value = 0; $('liveBtn').setAttribute('aria-pressed', 'true'); updateSun(); };
 
@@ -353,6 +391,7 @@ document.addEventListener('pointerdown', e => {
   for (const [o, b] of [['placePop', 'placeBtn'], ['layersPop', 'layersBtn']]) if (!$(o).hidden && !$(o).contains(e.target) && !$(b).contains(e.target) && !$('feedChip').contains(e.target)) togglePop(o, b, false);
 });
 document.addEventListener('keydown', e => {
+  if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName)) { recenter(); return; }
   if (e.key !== 'Escape') return;
   if (!$('placePop').hidden || !$('layersPop').hidden) { togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false); }
   else if (S.selId) select(null); else if (S.tab !== 'sky') setTab('sky');
@@ -389,10 +428,12 @@ function bindSeg(id, get, set) {
   const paint = () => bs.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === get())));
   bs.forEach(b => b.onclick = () => { set(b.dataset.v); paint(); }); paint();
 }
-bindSeg('styleSeg', () => settings.style, v => { settings.style = v; saveSettings(); world.loadTiles(S.proj, v); $('tileCredit').textContent = TILE_STYLES[v].credit; });
+bindSeg('styleSeg', () => settings.style, v => { settings.style = v; saveSettings(); world.setStyle(v); $('tileCredit').textContent = TILE_STYLES[v].credit; });
+bindSeg('namesSeg', () => settings.names ? 'on' : 'off', v => { settings.names = v === 'on'; saveSettings(); world.setNames(settings.names); });
 bindSeg('cloudSeg', () => settings.clouds ? 'on' : 'off', v => { settings.clouds = v === 'on'; saveSettings(); world.cloudsOn = settings.clouds; });
 bindSeg('labelSeg', () => settings.labels, v => { settings.labels = v; saveSettings(); });
 $('tileCredit').textContent = TILE_STYLES[settings.style].credit;
+world.setStyle(settings.style); world.setNames(settings.names);
 world.cloudsOn = settings.clouds;
 
 /* ---------------- tabs & panels ---------------- */
@@ -447,7 +488,7 @@ function flipTo(el, ch, delay) {
 function setCell(fl, str, i) { const s = (str || '').toUpperCase().slice(0, fl.length).padEnd(fl.length, ' '); fl.forEach((el, j) => flipTo(el, s[j], i * 35 + j * 22)); }
 function updateBoard() {
   if (!$('flapBoard')) return;
-  const list = [...S.flights.values()].map(f => ({ f, r: relative(f) })).sort((a, b) => a.r.d - b.r.d).slice(0, ROWS);
+  const list = [...S.flights.values()].map(f => ({ f, r: rel(f) })).sort((a, b) => a.r.d - b.r.d).slice(0, ROWS);
   if (S.mode === 'live') D.wantRoutes(list.map(x => x.f.callsign));
   rowEls.forEach((re, i) => {
     const it = list[i];
@@ -467,7 +508,7 @@ function renderEvents() {
 
 /* stats */
 function statsHTML() {
-  const arr = [...S.flights.values()];
+  const arr = inRange().map(o => o.f);
   const climb = arr.filter(f => fpm(f) > 300).length, desc = arr.filter(f => fpm(f) < -300).length, cruise = arr.filter(f => f.alt > 7 && Math.abs(fpm(f)) <= 300).length;
   const bins = new Array(9).fill(0);
   for (const f of arr) bins[Math.min(8, Math.floor(f.alt * 3280.84 / 5000))]++;
@@ -498,7 +539,9 @@ function statsHTML() {
 function tickRecords() {
   const R = S.rec;
   for (const f of S.flights.values()) {
-    const r = relative(f), k = kt(f);
+    const r = rel(f); if (r.d > IN_RANGE) continue;
+    if (!f.caught) catchFlight(f);
+    const k = kt(f);
     if (!R.fast || k > R.fast.v) R.fast = { v: k, cs: f.callsign };
     if (!R.high || f.alt > R.high.v) R.high = { v: f.alt, cs: f.callsign };
     if (!R.far || r.d > R.far.v) R.far = { v: r.d, cs: f.callsign };
@@ -559,19 +602,33 @@ function codesHTML() {
     <p><b>Colour is altitude.</b> Amber is low (arrivals and departures), pink is mid-level, and blue is cruise height.</p>
     <p><b>Height is exaggerated 2.2×</b> in Orbit and Map views so climbs and descents read clearly. Ground view uses true angles, so it matches what you see outside.</p>
     <p><b>The ground curves.</b> Aircraft 150 km away sit below the horizon line, just like in reality.</p>
+    <p><b>It's a whole planet.</b> Zoom out (or tap Globe) to see live traffic across continents. The night side of the earth follows the real sun and lights up with cities. Press H or tap ⌖ to fly back home.</p>
     <p class="sec-h">Data</p>
-    <p>Aircraft positions come from the community-run ADS-B networks <a href="https://adsb.lol" target="_blank" rel="noopener">ADSB.lol</a>, <a href="https://airplanes.live" target="_blank" rel="noopener">airplanes.live</a> and <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a>. Routes come from ADSB.lol, photos from <a href="https://www.planespotters.net" target="_blank" rel="noopener">Planespotters.net</a>, weather from <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>, and place search from <a href="https://nominatim.openstreetmap.org" target="_blank" rel="noopener">OpenStreetMap Nominatim</a>. ${esc(TILE_STYLES[settings.style].credit)}. For spotting fun only, not for navigation.</p></div>`;
+    <p>Aircraft positions come from the community-run ADS-B networks <a href="https://adsb.lol" target="_blank" rel="noopener">ADSB.lol</a>, <a href="https://airplanes.live" target="_blank" rel="noopener">airplanes.live</a> and <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a>. Routes come from <a href="https://www.adsbdb.com" target="_blank" rel="noopener">adsbdb.com</a>, photos from <a href="https://www.planespotters.net" target="_blank" rel="noopener">Planespotters.net</a>, weather from <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>, and place search from <a href="https://nominatim.openstreetmap.org" target="_blank" rel="noopener">OpenStreetMap Nominatim</a>. ${esc(TILE_STYLES[settings.style].credit)}. For spotting fun only, not for navigation.</p></div>`;
 }
 
 /* ---------------- HUD ---------------- */
+// aircraft within IN_RANGE of home, refreshed with the HUD
+let nearCache = [], nearT = 0;
+function inRange() {
+  if (performance.now() - nearT > 400) { nearT = performance.now(); nearCache = []; for (const f of S.flights.values()) { const r = rel(f); if (r.d <= IN_RANGE) nearCache.push({ f, r }); } }
+  return nearCache;
+}
+function updateExplore() {
+  const d = world.homeDist(), away = S.view !== 'ground' && (d > 40 || world.cam.r > 2500) && !(world.fly && world.fly.b.r === HOME_R && haversine(world.fly.b.lat, world.fly.b.lon, S.proj.lat0, S.proj.lon0) < 1);
+  $('explore').hidden = !away;
+  if (away) $('exploreT').textContent = `${d < 40 ? 'Zoomed out' : Math.round(d).toLocaleString('en') + ' km from home'} · ${S.flights.size.toLocaleString('en')} aircraft tracked`;
+  paintView();
+}
 function updateHUD() {
-  const arr = [...S.flights.values()];
+  updateExplore();
+  const near = inRange(), arr = near.map(o => o.f);
   $('rCount').textContent = arr.length;
-  if (!arr.length) { $('rHigh').textContent = $('rNear').textContent = '—'; $('toast').hidden = true; return; }
+  if (!arr.length) { $('rHigh').textContent = $('rNear').textContent = '—'; $('rHighS').innerHTML = $('rNearS').innerHTML = '&nbsp;'; $('toast').hidden = true; return; }
   const hi = arr.reduce((a, b) => (b.alt > a.alt ? b : a)); $('rHigh').textContent = fmtAlt(hi.alt).replace(' ft', ''); $('rHighS').textContent = hi.callsign;
-  let near = null, nr = null; for (const f of arr) { const r = relative(f); if (!nr || r.slant < nr.slant) { near = f; nr = r; } }
-  $('rNear').textContent = (nr.slant < 10 ? nr.slant.toFixed(1) : Math.round(nr.slant)) + ' km'; $('rNearS').textContent = `${near.callsign} · look ${P16[pt16(nr.brg)]}`;
-  const over = arr.map(f => ({ f, r: relative(f) })).filter(o => o.r.d < 5 && o.f.alt < 6).sort((a, b) => a.r.d - b.r.d)[0];
+  let nf = null, nr = null; for (const { f, r } of near) if (!nr || r.slant < nr.slant) { nf = f; nr = r; }
+  $('rNear').textContent = (nr.slant < 10 ? nr.slant.toFixed(1) : Math.round(nr.slant)) + ' km'; $('rNearS').textContent = `${nf.callsign} · look ${P16[pt16(nr.brg)]}`;
+  const over = near.filter(o => o.r.d < 5 && o.f.alt < 6).sort((a, b) => a.r.d - b.r.d)[0];
   if (over) {
     $('toast').hidden = false;
     $('toastText').textContent = `${over.f.callsign} is ${over.r.d.toFixed(1)} km away at ${fmtAlt(over.f.alt)}, ${Math.round(over.r.elev)}° up to the ${P16L[pt16(over.r.brg)]}.`;
@@ -579,12 +636,24 @@ function updateHUD() {
   } else $('toast').hidden = true;
 }
 
+// one-time tip on how to move around the globe
+function showHint() {
+  if (store.get('squawk.hint', false)) return;
+  const touch = matchMedia('(pointer: coarse)').matches, el = $('hint');
+  el.textContent = touch ? 'Drag to move · Pinch to zoom · Twist or two-finger drag to turn and tilt' : 'Drag to move · Scroll to zoom · Right-drag to turn and tilt · Press H to come home';
+  setTimeout(() => { el.hidden = false; setTimeout(() => { el.hidden = true; }, 7000); }, 4500);
+  store.set('squawk.hint', true);
+}
+
 /* ---------------- loop ---------------- */
 let acc = { hud: 0, card: 0, board: 2.5, panel: 0, rec: 0, hist: 15 };
 const loader = $('loader'); let loaderDone = false; const bootT = performance.now();
 function frame() {
   requestAnimationFrame(frame);
-  const dt = Math.min(world.clock.getDelta(), 0.1), t = world.clock.elapsedTime;
+  tick(Math.min(world.clock.getDelta(), 0.1));
+}
+function tick(dt) {
+  const t = world.clock.elapsedTime;
   if (S.mode === 'sim') simStep(dt); else if (S.mode === 'live') reckon(dt);
   const arr = [...S.flights.values()];
   world.syncAircraft(arr, dt, t, S.selId);
@@ -593,19 +662,21 @@ function frame() {
   updateLabels(arr);
   if ((acc.hud += dt) > 0.5) { acc.hud = 0; updateHUD(); }
   if ((acc.card += dt) > 0.3) { acc.card = 0; if (S.selId) updateCard(); }
-  if ((acc.rec += dt) > 1) { acc.rec = 0; tickRecords(); }
-  if ((acc.hist += dt) > 20) { acc.hist = 0; if (S.mode !== 'boot') { S.history.push({ t: Date.now(), n: S.flights.size }); if (S.history.length > 90) S.history.shift(); } }
+  if ((acc.rec += dt) > 1) { acc.rec = 0; tickRecords(); followView(); }
+  if ((acc.hist += dt) > 20) { acc.hist = 0; if (S.mode !== 'boot') { S.history.push({ t: Date.now(), n: inRange().length }); if (S.history.length > 90) S.history.shift(); } }
   if (S.tab === 'board' && (acc.board += dt) > 3) { acc.board = 0; updateBoard(); }
   if ((S.tab === 'stats' || S.tab === 'log') && (acc.panel += dt) > 3) { acc.panel = 0; renderPanel(false); }
   if (!loaderDone) {
     const p = world.tileProgress(), k = p.total ? p.done / p.total : 0;
     $('loadArc').style.strokeDashoffset = String(1 - Math.max(0.03, Math.min(1, k * 0.8 + (S.feedResolved ? 0.2 : 0))));
     $('loadMsg').textContent = S.feedResolved ? 'Loading the ground' : 'Tuning to 1090 MHz';
-    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.introT = 0; }
+    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.intro(); showHint(); }
   }
 }
 
-window.__squawk = { world, S, ingest: list => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list); } };
+// console hooks for debugging; step(n) runs n frames by hand, which also works while the tab is in the background
+window.__squawk = { world, S, ingest: list => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list); },
+  step: (n = 1, dt = 1 / 30) => { for (let i = 0; i < n; i++) { world.clock.elapsedTime += dt; tick(dt); } } };
 $('timeR').value = 0;
-setPlace(settings.place);
+setPlace(settings.place, true);
 requestAnimationFrame(frame);

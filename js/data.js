@@ -96,31 +96,35 @@ async function getJSON(url, opts = {}, ms = 8000) {
 // Community ADS-B networks serving the readsb "v2" JSON format. Browsers block direct requests to them
 // (no CORS headers), so Squawk first tries a same-origin relay (vercel.json / _redirects rewrite these paths),
 // then an optional relay URL (e.g. the Cloudflare Worker in /worker), then the networks directly.
+// max is the biggest radius (nm) each network answers; only ADSB.lol serves continent-sized areas for the globe view.
 const DIRECT = [
-  { name: 'ADSB.lol', relay: 'api/adsb', url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}`, path: (la, lo, nm) => `lat/${la}/lon/${lo}/dist/${nm}` },
-  { name: 'airplanes.live', relay: 'api/apl', url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}`, path: (la, lo, nm) => `point/${la}/${lo}/${nm}` },
-  { name: 'adsb.fi', relay: 'api/adsbfi', url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}`, path: (la, lo, nm) => `lat/${la}/lon/${lo}/dist/${nm}` }
+  { name: 'ADSB.lol', max: 6000, relay: 'api/adsb', url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}`, path: (la, lo, nm) => `lat/${la}/lon/${lo}/dist/${nm}` },
+  { name: 'airplanes.live', max: 250, relay: 'api/apl', url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}`, path: (la, lo, nm) => `point/${la}/${lo}/${nm}` },
+  { name: 'adsb.fi', max: 250, relay: 'api/adsbfi', url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}`, path: (la, lo, nm) => `lat/${la}/lon/${lo}/dist/${nm}` }
 ];
 export const feedConfig = { relayUrl: '' };
 const dead = new Set();
 function sources() {
   const out = [];
-  if (location.protocol.startsWith('http')) for (const p of DIRECT) out.push({ key: 'same:' + p.name, name: p.name, make: (a, b, c) => `${p.relay}/${p.path(a, b, c)}` });
+  if (location.protocol.startsWith('http')) for (const p of DIRECT) out.push({ key: 'same:' + p.name, name: p.name, max: p.max, make: (a, b, c) => `${p.relay}/${p.path(a, b, c)}` });
   const r = (feedConfig.relayUrl || '').trim();
-  if (r) for (const p of DIRECT) out.push({ key: 'relay:' + p.name, name: p.name + ' via relay', make: (a, b, c) => `${r}${r.includes('?') ? '&' : '?'}url=${encodeURIComponent(p.url(a, b, c))}` });
-  for (const p of DIRECT) out.push({ key: 'direct:' + p.name, name: p.name, make: p.url });
+  if (r) for (const p of DIRECT) out.push({ key: 'relay:' + p.name, name: p.name + ' via relay', max: p.max, make: (a, b, c) => `${r}${r.includes('?') ? '&' : '?'}url=${encodeURIComponent(p.url(a, b, c))}` });
+  for (const p of DIRECT) out.push({ key: 'direct:' + p.name, name: p.name, max: p.max, make: p.url });
   return out.filter(s => !dead.has(s.key));
 }
 let lastGood = null;
 export const resetFeedSources = () => { dead.clear(); lastGood = null; };
 export async function fetchAircraft(lat, lon, nm) {
-  let list = sources(); if (lastGood) list = [...list.filter(s => s.key === lastGood), ...list.filter(s => s.key !== lastGood)];
+  // sources that can serve the whole radius first, then the one that worked last time
+  const rank = s => (s.max >= nm ? 0 : 2) + (s.key === lastGood ? 0 : 1);
+  const list = sources().sort((a, b) => rank(a) - rank(b));
   let lastErr;
   for (const s of list) {
     try {
-      const r = await fetch(s.make(lat.toFixed(4), lon.toFixed(4), nm), { cache: 'no-store', signal: AbortSignal.timeout ? AbortSignal.timeout(7000) : undefined });
+      const r = await fetch(s.make(lat.toFixed(4), lon.toFixed(4), Math.min(nm, s.max)), { cache: 'no-store', signal: AbortSignal.timeout ? AbortSignal.timeout(nm > 500 ? 25000 : 8000) : undefined });
       const ct = r.headers.get('content-type') || '';
-      if (!r.ok || !ct.includes('json')) { if (r.status === 404 || r.status === 405 || !ct.includes('json')) dead.add(s.key); throw new Error('HTTP ' + r.status); }
+      if (r.status === 429) throw Object.assign(new Error('rate limited'), { rate: true });
+      if (!r.ok || !ct.includes('json')) { if ([401, 403, 404, 405].includes(r.status) || !ct.includes('json')) dead.add(s.key); throw new Error('HTTP ' + r.status); }
       const j = await r.json(); const ac = j.ac || j.aircraft;
       if (!Array.isArray(ac)) throw new Error('bad payload');
       lastGood = s.key; return { list: ac, provider: s.name };
