@@ -1,4 +1,6 @@
-// The 3D world: real-sun sky, satellite ground, weather clouds, aircraft, trails, camera.
+// The 3D world: a streaming globe with the real sun, weather clouds at home, aircraft, trails and a globe camera.
+// Scene units are km in an earth-centred frame shifted by a floating origin (this.O). Things that belong to the
+// observer (pin, range rings, runways, clouds) live in homeGroup, a local frame at home: +x east, +y up, -z north.
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
@@ -9,9 +11,12 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { D2R, clamp, lerp, smooth, curvDrop, sunPosition } from './geo.js';
+import { Globe, TILE_STYLES } from './globe.js';
+import { D2R, EARTH_R, clamp, lerp, smooth, curvDrop, sunPosition, unitDir, enu, toLatLon, haversine, step } from './geo.js';
 
-const MAXP = 1200, TRAIL_N = 80, TRAIL_EVERY = 1.0;
+export { TILE_STYLES };
+const MAXP = 9000, TRAIL_F = 500, TRAIL_N = 80, TRAIL_EVERY = 1.0;
+export const HOME_R = 95, SPACE_R = 22000;
 export const RINGS = [10, 25, 50, 100, 150];
 export const COL = {
   low: new THREE.Color('#FF9F1C'), mid: new THREE.Color('#FF3D8B'), high: new THREE.Color('#29C5FF'),
@@ -21,85 +26,17 @@ export function altColor(km, out) {
   const t = clamp(km / 11.5, 0, 1);
   return t < 0.45 ? out.copy(COL.low).lerp(COL.mid, t / 0.45) : out.copy(COL.mid).lerp(COL.high, (t - 0.45) / 0.55);
 }
-
-/* ---------------- map tiles ---------------- */
-export const TILE_STYLES = {
-  satellite: { url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, base: '#3c5566', credit: 'Imagery © Esri, Maxar, Earthstar Geographics' },
-  map: { url: (z, x, y) => `https://${'abcd'[(x + y) % 4]}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`, base: '#cfdde3', credit: '© OpenStreetMap contributors © CARTO' }
-};
-const tileX = (lon, z) => (lon + 180) / 360 * 2 ** z;
-const tileY = (lat, z) => (1 - Math.log(Math.tan(lat * D2R) + 1 / Math.cos(lat * D2R)) / Math.PI) / 2 * 2 ** z;
-const tileLon = (x, z) => x / 2 ** z * 360 - 180;
-const tileLat = (y, z) => { const n = Math.PI - 2 * Math.PI * y / 2 ** z; return Math.atan(Math.sinh(n)) * 180 / Math.PI; };
-
-class TileLayer {
-  constructor(world, z, n, fade, yOff, order) {
-    Object.assign(this, { world, z, n, fade, yOff, order });
-    this.raw = document.createElement('canvas'); this.raw.width = this.raw.height = n * 256;
-    this.cv = document.createElement('canvas'); this.cv.width = this.cv.height = n * 256;
-    this.tex = new THREE.CanvasTexture(this.cv);
-    this.tex.colorSpace = THREE.SRGBColorSpace;
-    this.tex.anisotropy = world.renderer.capabilities.getMaxAnisotropy();
-    this.mat = new THREE.MeshBasicMaterial({ map: this.tex, transparent: fade, depthWrite: !fade, fog: true });
-    this.mesh = null; this.gen = 0;
-  }
-  build(proj, style) {
-    const gen = ++this.gen, z = this.z, n = this.n, w = this.world;
-    const fx = tileX(proj.lon0, z), fy = tileY(proj.lat0, z);
-    const x0 = Math.floor(fx) - (n - 1) / 2, y0 = Math.floor(fy) - (n - 1) / 2;
-    this.ox = (fx - x0) * 256; this.oy = (fy - y0) * 256;
-    const seg = 64, pos = [], uv = [], idx = [];
-    for (let j = 0; j <= seg; j++) for (let i = 0; i <= seg; i++) {
-      const tx = x0 + i / seg * n, ty = y0 + j / seg * n;
-      const p = proj.toXZ(tileLat(ty, z), tileLon(tx, z));
-      pos.push(p.x, -curvDrop(p.x, p.z) + this.yOff, p.z); uv.push(i / seg, 1 - j / seg);
-    }
-    for (let j = 0; j < seg; j++) for (let i = 0; i < seg; i++) {
-      const a = j * (seg + 1) + i, b = a + 1, c = a + seg + 1, d = c + 1;
-      idx.push(a, c, b, b, c, d);
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx);
-    if (this.mesh) { this.mesh.geometry.dispose(); w.scene.remove(this.mesh); }
-    this.mesh = new THREE.Mesh(g, this.mat); this.mesh.renderOrder = this.order; w.scene.add(this.mesh);
-    const rc = this.raw.getContext('2d'); rc.clearRect(0, 0, this.raw.width, this.raw.height);
-    if (!this.fade) { rc.fillStyle = TILE_STYLES[style].base; rc.fillRect(0, 0, this.raw.width, this.raw.height); }
-    this.composite();
-    this.total = n * n; this.done = 0;
-    const order = [];
-    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) order.push([i, j, Math.hypot(i - (n - 1) / 2, j - (n - 1) / 2)]);
-    order.sort((a, b) => a[2] - b[2]);
-    const max = 2 ** z;
-    for (const [i, j] of order) {
-      const tx = ((x0 + i) % max + max) % max, ty = y0 + j;
-      if (ty < 0 || ty >= max) { this.done++; continue; }
-      const img = new Image(); img.crossOrigin = 'anonymous';
-      img.onload = () => { if (gen !== this.gen) return; rc.drawImage(img, i * 256, j * 256); this.done++; this.dirty = true; };
-      img.onerror = () => { if (gen !== this.gen) return; this.done++; this.failed = (this.failed || 0) + 1; };
-      img.src = TILE_STYLES[style].url(z, tx, ty);
-    }
-  }
-  composite() {
-    const c = this.cv.getContext('2d'), W = this.cv.width;
-    c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, W, W); c.drawImage(this.raw, 0, 0);
-    if (this.fade) {
-      const edge = Math.min(this.ox, this.oy, W - this.ox, W - this.oy) - 4;
-      const gr = c.createRadialGradient(this.ox, this.oy, edge * 0.62, this.ox, this.oy, edge);
-      gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-      c.globalCompositeOperation = 'destination-in'; c.fillStyle = gr; c.fillRect(0, 0, W, W);
-      c.globalCompositeOperation = 'source-over';
-    }
-    this.tex.needsUpdate = true; this.dirty = false;
-  }
-}
+// nav lights in the model's frame: x, y, z offset, then r, g, b
+const NAV = [[-0.53, 0, 0.1, 1, 0.12, 0.15], [0.53, 0, 0.1, 0.1, 1, 0.35], [0, 0.02, 0.6, 1, 1, 1], [0, -0.07, 0, 1, 0.1, 0.1]];
+const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const ease = k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
 
 /* ---------------- shaders ---------------- */
 const CLOUD_VS = `
 #include <common>
 #include <logdepthbuf_pars_vertex>
 varying vec2 vW;
-void main(){ vec4 wp = modelMatrix * vec4(position,1.0); vW = wp.xz; gl_Position = projectionMatrix * viewMatrix * wp;
+void main(){ vW = position.xz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 #include <logdepthbuf_vertex>
 }`;
 const CLOUD_FS = `
@@ -151,60 +88,79 @@ export class World {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 0.55;
-    this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(50, 1, 0.002, 30000);
+    this.scene = new THREE.Scene(); this.scene.background = new THREE.Color('#02040a');
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.002, 90000);
     this.scene.fog = new THREE.FogExp2(0xb8cfe6, 0.0032);
     this.altScale = 2.2; this.mode = 'orbit';
     this.clock = new THREE.Clock();
-    this.tmpV = new THREE.Vector3(); this.tmpC = new THREE.Color(); this.tmpQ = new THREE.Quaternion(); this.tmpE = new THREE.Euler(); this.tmpM = new THREE.Matrix4(); this.tmpS = new THREE.Vector3();
-    this.vis = new Map(); this.style = 'satellite'; this.cloudsOn = true; this.day = 1;
-    this.buildSky(); this.buildGround(); this.buildClouds(); this.buildAircraft(); this.buildObserver();
-    this.airportGroup = new THREE.Group(); this.scene.add(this.airportGroup);
+    this.tmpV = new THREE.Vector3(); this.tmpW = new THREE.Vector3(); this.tmpC = new THREE.Color(); this.tmpQ = new THREE.Quaternion(); this.tmpQ2 = new THREE.Quaternion();
+    this.tmpE = new THREE.Euler(); this.tmpM = new THREE.Matrix4(); this.tmpS = new THREE.Vector3();
+    this.e = new THREE.Vector3(); this.n = new THREE.Vector3(); this.u = new THREE.Vector3(); this.s = new THREE.Vector3(); this.hv = new THREE.Vector3();
+    this.O = new THREE.Vector3(0, 0, EARTH_R); this.homeLL = { lat: 0, lon: 0 };
+    this.vis = new Map(); this.cloudsOn = true; this.day = 1;
+    this.homeGroup = new THREE.Group(); this.homeGroup.matrixAutoUpdate = false; this.scene.add(this.homeGroup);
+    this.globe = new Globe(this.renderer, this.scene);
+    this.buildSky(); this.buildClouds(); this.buildAircraft(); this.buildObserver();
+    this.airportGroup = new THREE.Group(); this.homeGroup.add(this.airportGroup);
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.35, 0.45, 0.82);
     this.composer.addPass(this.bloom); this.composer.addPass(new OutputPass());
-    this.cam = { target: new THREE.Vector3(0, 2, 0), r: 95, theta: 0.6, phi: 1.02, yaw: 0, pitch: 22 * D2R, fov: 62 };
-    this.curPos = new THREE.Vector3(0, 400, 300); this.curLook = new THREE.Vector3();
+    this.cam = { lat: 0, lon: 0, h: 2, r: SPACE_R, theta: 0, phi: 0, yaw: 0, pitch: 22 * D2R, fov: 62 };
+    this.curPos = new THREE.Vector3(); this.curLook = new THREE.Vector3(); this.curUp = new THREE.Vector3(0, 1, 0);
+    this.fly = null; this.inertia = null; this.snap = true; this.lastInteract = -10;
     this.bindInput();
   }
 
+  /* ---------- frames ---------- */
+  llToScene(lat, lon, h, out) { return unitDir(lat, lon, out).multiplyScalar(EARTH_R + h).sub(this.O); }
+  placeHome() {
+    const { lat, lon } = this.homeLL; enu(lat, lon, this.e, this.n, this.u); this.s.copy(this.n).negate();
+    this.homeGroup.matrix.makeBasis(this.e, this.u, this.s).setPosition(this.llToScene(lat, lon, 0, this.tmpV));
+    this.homeGroup.matrixWorldNeedsUpdate = true; this.homeGroup.updateMatrixWorld(true);
+    this.homePos = this.llToScene(lat, lon, 0, this.homePos || new THREE.Vector3());
+  }
+  setHome(lat, lon) { this.homeLL = { lat, lon }; this.placeHome(); this.globe.prefetch(lat, lon); if (this.sunDate) this.setSun(this.sunDate); }
+  /** Move the floating origin so the area in view keeps full float precision on the GPU. */
+  rebase(by) {
+    this.O.add(by); this.curPos.sub(by); this.curLook.sub(by);
+    for (const v of this.vis.values()) v.pos.sub(by);
+    this.placeHome(); this.trailClock = 1;
+  }
+  focus() { return { lat: this.cam.lat, lon: this.cam.lon }; }
+  viewRadius() { return Math.min(this.cam.r * 0.9, 9000); }
+  homeDist() { return haversine(this.homeLL.lat, this.homeLL.lon, this.cam.lat, this.cam.lon); }
+
   /* ---------- sky, sun, weather ---------- */
   buildSky() {
-    this.sky = new Sky(); this.sky.scale.setScalar(9000); this.sky.renderOrder = -10; this.scene.add(this.sky);
+    this.sky = new Sky(); this.sky.scale.setScalar(9000); this.sky.renderOrder = -10; this.sky.frustumCulled = false; this.scene.add(this.sky);
     const u = this.sky.material.uniforms; u.turbidity.value = 2; u.rayleigh.value = 1.8; u.mieCoefficient.value = 0.003; u.mieDirectionalG.value = 0.8;
     this.sunDir = new THREE.Vector3(0, 1, 0);
     this.sunLight = new THREE.DirectionalLight(0xffffff, 2.2); this.scene.add(this.sunLight);
     this.hemi = new THREE.HemisphereLight(0xcfe3ff, 0x7a6a55, 1.1); this.scene.add(this.hemi);
     const n = 2500, p = new Float32Array(n * 3);
-    for (let i = 0; i < n; i++) { const u2 = Math.random() * Math.PI * 2, v = Math.random() * 0.97 + 0.03, r = 8000, s = Math.sqrt(1 - v * v); p.set([Math.cos(u2) * s * r, v * r, Math.sin(u2) * s * r], i * 3); }
+    for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, v = Math.random() * 2 - 1, r = 8000, s = Math.sqrt(1 - v * v); p.set([Math.cos(a) * s * r, v * r, Math.sin(a) * s * r], i * 3); }
     const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3));
     this.stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0, fog: false, depthWrite: false }));
-    this.stars.renderOrder = -9; this.scene.add(this.stars);
+    this.stars.renderOrder = -9; this.stars.frustumCulled = false; this.scene.add(this.stars);
   }
-  setSun(date, lat, lon) {
-    const s = sunPosition(date, lat, lon); this.sun = s;
+  setSun(date) {
+    this.sunDate = date;
+    const { lat, lon } = this.homeLL, s = sunPosition(date, lat, lon); this.sun = s;
     const el = s.alt * D2R, az = s.az * D2R;
-    this.sunDir.set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el));
-    this.sky.material.uniforms.sunPosition.value.copy(this.sunDir);
+    enu(lat, lon, this.e, this.n, this.u);
+    this.sunDir.copy(this.e).multiplyScalar(Math.sin(az) * Math.cos(el)).addScaledVector(this.n, Math.cos(az) * Math.cos(el)).addScaledVector(this.u, Math.sin(el));
+    this.sky.material.uniforms.sunPosition.value.copy(this.sunDir); this.globe.setSun(this.sunDir);
     const day = smooth(-7, 6, s.alt), golden = 1 - smooth(2, 18, s.alt);
-    this.day = day;
-    this.sunLight.position.copy(this.sunDir).multiplyScalar(500);
+    this.day = day; this.golden = golden;
     this.sunLight.color.set('#fff4e6').lerp(this.tmpC.set('#ffab6b'), golden * 0.85);
     this.sunLight.intensity = 2.4 * smooth(-3, 6, s.alt);
     this.hemi.intensity = 0.25 + 1.0 * day;
-    this.renderer.toneMappingExposure = lerp(0.62, 0.46, day);
     const fog = this.tmpC.set('#0b1428').lerp(new THREE.Color('#e9b596'), smooth(-6, 2, s.alt) * golden).lerp(new THREE.Color('#bcd3ea'), smooth(4, 18, s.alt));
     this.scene.fog.color.copy(fog);
-    this.stars.material.opacity = 1 - smooth(-12, -2, s.alt);
-    const tint = lerp(0.14, 1, day);
-    this.tileTint = new THREE.Color(tint, tint * lerp(0.9, 1, 1 - golden * 0.4), tint * lerp(0.82, 1, 1 - golden * 0.5));
-    for (const L of this.layers) L.mat.color.copy(this.tileTint);
-    this.baseMat.color.copy(this.tileTint).multiply(new THREE.Color(TILE_STYLES[this.style].base));
     const cu = this.cloud.material.uniforms;
     cu.uLit.value.set('#ffffff').lerp(this.tmpC.set('#ffc09a'), golden * 0.8).multiplyScalar(lerp(0.12, 1.05, day));
     cu.uShade.value.set('#8d9bb0').multiplyScalar(lerp(0.1, 1, day));
-    this.bloom.strength = lerp(0.75, 0.18, day);
   }
   setWeather(w) {
     const u = this.cloud.material.uniforms;
@@ -212,33 +168,27 @@ export class World {
     u.uCover.value = clamp(0.08 + cc / 100 * 0.52, 0, 0.62);
     const wd = ((w?.wind_direction_10m ?? 250) + 180) * D2R, ws = (w?.wind_speed_10m ?? 15) / 3600 * 0.05; // wind blows toward dir+180
     u.uWind.value.set(Math.sin(wd) * ws * 25, -Math.cos(wd) * ws * 25);
-    const tb = 1.6 + (w?.cloud_cover ?? 30) / 100 * 3.5 + (w?.visibility != null ? clamp((20000 - w.visibility) / 20000, 0, 1) * 4 : 0);
-    this.sky.material.uniforms.turbidity.value = tb;
-    this.scene.fog.density = 0.0026 + (w?.visibility != null ? clamp((30000 - w.visibility) / 30000, 0, 1) * 0.004 : 0.0008);
-    this.baseFog = this.scene.fog.density;
+    this.turbidity = 1.6 + (w?.cloud_cover ?? 30) / 100 * 3.5 + (w?.visibility != null ? clamp((20000 - w.visibility) / 20000, 0, 1) * 4 : 0);
+    this.sky.material.uniforms.turbidity.value = this.turbidity;
+    this.baseFog = 0.0026 + (w?.visibility != null ? clamp((30000 - w.visibility) / 30000, 0, 1) * 0.004 : 0.0008);
   }
 
   /* ---------- ground ---------- */
-  buildGround() {
-    const g = new THREE.PlaneGeometry(3000, 3000, 120, 120).rotateX(-Math.PI / 2);
-    const p = g.attributes.position; for (let i = 0; i < p.count; i++) p.setY(i, -curvDrop(p.getX(i), p.getZ(i)) - 0.06);
-    this.baseMat = new THREE.MeshBasicMaterial({ color: TILE_STYLES.satellite.base });
-    this.base = new THREE.Mesh(g, this.baseMat); this.base.renderOrder = -1; this.scene.add(this.base);
-    this.layers = [new TileLayer(this, 8, 5, false, 0, 0), new TileLayer(this, 10, 7, true, 0.012, 1), new TileLayer(this, 12, 7, true, 0.024, 2)];
-  }
-  loadTiles(proj, style) { this.style = style; this.proj = proj; for (const L of this.layers) L.build(proj, style); if (this.tileTint) this.baseMat.color.copy(this.tileTint).multiply(new THREE.Color(TILE_STYLES[style].base)); }
-  tileProgress() { let t = 0, d = 0, f = 0; for (const L of this.layers) { t += L.total || 0; d += L.done || 0; f += L.failed || 0; } return { total: t, done: d, failed: f }; }
+  setStyle(style) { this.style = style; this.globe.setStyle(style); }
+  setNames(on) { this.globe.setNames(on); }
+  tileProgress() { return this.globe.progress; }
 
   buildClouds() {
-    const g = new THREE.PlaneGeometry(700, 700, 1, 1).rotateX(-Math.PI / 2);
+    const g = new THREE.PlaneGeometry(700, 700, 48, 48).rotateX(-Math.PI / 2);
+    const p = g.attributes.position; for (let i = 0; i < p.count; i++) p.setY(i, -curvDrop(p.getX(i), p.getZ(i)));
     const m = new THREE.ShaderMaterial({ vertexShader: CLOUD_VS, fragmentShader: CLOUD_FS, transparent: true, depthWrite: false, side: THREE.DoubleSide,
       uniforms: { uTime: { value: 0 }, uCover: { value: 0.25 }, uOpacity: { value: 0.9 }, uWind: { value: new THREE.Vector2(0.02, 0) }, uLit: { value: new THREE.Color(1, 1, 1) }, uShade: { value: new THREE.Color(0.6, 0.65, 0.72) } } });
-    this.cloud = new THREE.Mesh(g, m); this.cloud.renderOrder = 5; this.cloud.frustumCulled = false; this.scene.add(this.cloud);
+    this.cloud = new THREE.Mesh(g, m); this.cloud.renderOrder = 5; this.cloud.frustumCulled = false; this.homeGroup.add(this.cloud);
   }
 
   /* ---------- observer & airports ---------- */
   buildObserver() {
-    this.obs = new THREE.Group(); this.scene.add(this.obs);
+    this.obs = new THREE.Group(); this.homeGroup.add(this.obs);
     const pin = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1.2, 20).rotateX(Math.PI).translate(0, 0.6, 0), new THREE.MeshStandardMaterial({ color: '#FF5A1F', emissive: '#FF5A1F', emissiveIntensity: 0.6 }));
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.42, 20, 14).translate(0, 1.35, 0), pin.material);
     this.pin = new THREE.Group(); this.pin.add(pin, head); this.obs.add(this.pin);
@@ -282,75 +232,100 @@ export class World {
     const dg = new THREE.BufferGeometry(); dg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAXP * 6), 3).setUsage(THREE.DynamicDrawUsage));
     this.drops = new THREE.LineSegments(dg, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.35, depthWrite: false }));
     this.drops.frustumCulled = false; this.scene.add(this.drops);
-    this.trailPos = new Float32Array(MAXP * TRAIL_N * 6); this.trailCol = new Float32Array(MAXP * TRAIL_N * 6);
+    this.trailPos = new Float32Array(TRAIL_F * TRAIL_N * 6); this.trailCol = new Float32Array(TRAIL_F * TRAIL_N * 6);
     const tg = new LineSegmentsGeometry(); tg.setPositions(this.trailPos); tg.setColors(this.trailCol); tg.instanceCount = 0;
     this.trailMat = new LineMaterial({ linewidth: 2.4, vertexColors: true, transparent: true, opacity: 0.92, depthWrite: false, worldUnits: false });
     this.trails = new LineSegments2(tg, this.trailMat); this.trails.frustumCulled = false; this.trails.renderOrder = 4; this.scene.add(this.trails);
     this.trailClock = 0;
   }
   resetAircraft() { this.vis.clear(); }
-  worldPos(f, out) { return out.set(f.x, f.alt * this.altScale - curvDrop(f.x, f.z) + 0.05, f.z); }
+  worldPos(f, out) { return this.llToScene(f.lat, f.lon, f.alt * this.altScale + 0.05, out); }
+  // The last 30 s of track, reconstructed from speed and heading, so a trail doesn't start from nothing.
+  backfill(f, v) {
+    v.filled = true; if (v.trail.length > 4) return;
+    const q = { lat: 0, lon: 0 }, d = new THREE.Vector3(), pts = [];
+    for (let k = 30; k >= 1; k--) {
+      const tt = k * TRAIL_EVERY; q.lat = f.lat; q.lon = f.lon; step(q, f.trk + 180, f.spd * tt); unitDir(q.lat, q.lon, d);
+      pts.push({ x: d.x, y: d.y, z: d.z, a: Math.max(0, f.alt - f.vr * tt) });
+    }
+    v.trail = pts.concat(v.trail);
+  }
 
   syncAircraft(flights, dt, t, selId) {
-    const cam = this.camera.position, seen = new Set();
-    let i = 0; const hp = this.halo.geometry.attributes.position.array, hc = this.halo.geometry.attributes.color.array;
+    const cam = this.camera.position, seen = new Set(), ground = this.mode === 'ground', e = this.e, n = this.n, u = this.u, s = this.s, O = this.O;
+    const hp = this.halo.geometry.attributes.position.array, hc = this.halo.geometry.attributes.color.array;
     const lp = this.lights.geometry.attributes.position.array, lc = this.lights.geometry.attributes.color.array, dp = this.drops.geometry.attributes.position.array;
+    const kLerp = 1 - Math.exp(-dt * 5), kYaw = 1 - Math.exp(-dt * 4), glow = 0.35 + 0.65 * (1 - this.day * 0.6);
+    let i = 0, ip = 0; // i: every aircraft (halo dot); ip: aircraft near enough to draw as a 3D model
     for (const f of flights) {
       if (i >= MAXP) break;
       seen.add(f.id);
+      enu(f.lat, f.lon, e, n, u);
+      const rr = EARTH_R + f.alt * this.altScale + 0.05, tx = u.x * rr - O.x, ty = u.y * rr - O.y, tz = u.z * rr - O.z;
       let v = this.vis.get(f.id);
-      const target = this.worldPos(f, this.tmpV);
-      if (!v) {
-        v = { pos: target.clone(), yaw: -f.trk * D2R, trail: [], last: 0, col: new THREE.Color() };
-        const bx = f.spd * Math.sin(f.trk * D2R), bz = -f.spd * Math.cos(f.trk * D2R);
-        for (let k = 30; k >= 1; k--) { const tt = k * TRAIL_EVERY; v.trail.push({ x: f.x - bx * tt, a: Math.max(0, f.alt - f.vr * tt), z: f.z - bz * tt }); }
-        this.vis.set(f.id, v);
-      } else v.pos.lerp(target, 1 - Math.exp(-dt * 5));
-      v.yaw += ((((-f.trk * D2R - v.yaw) + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI) * (1 - Math.exp(-dt * 4));
-      if (t - v.last > TRAIL_EVERY) { v.last = t; v.trail.push({ x: f.x, a: f.alt, z: f.z }); if (v.trail.length > TRAIL_N - 1) v.trail.shift(); }
-      const emg = f.emg; if (emg) v.col.copy(COL.emg); else altColor(f.alt, v.col);
-      const dist = cam.distanceTo(v.pos), s = clamp(dist * (this.mode === 'ground' ? 0.008 : 0.017), 0.03, 16) * (f.id === selId ? 1.35 : 1);
-      const pitch = clamp(Math.atan2(f.vr * this.altScale, f.spd + 1e-4) * 0.7, -0.22, 0.32), bank = clamp(-(f.turn || 0) * 0.14, -0.45, 0.45);
-      this.tmpE.set(pitch, v.yaw, bank, 'YXZ'); this.tmpQ.setFromEuler(this.tmpE);
-      this.tmpM.compose(v.pos, this.tmpQ, this.tmpS.setScalar(s)); this.planes.setMatrixAt(i, this.tmpM);
-      this.tmpC.copy(v.col).lerp(COL.white, f.id === selId ? 0.75 : 0.42); this.planes.setColorAt(i, this.tmpC);
-      hp[i * 3] = v.pos.x; hp[i * 3 + 1] = v.pos.y; hp[i * 3 + 2] = v.pos.z;
-      const hk = f.id === selId ? 1 : 0.9; hc[i * 3] = v.col.r * hk; hc[i * 3 + 1] = v.col.g * hk; hc[i * 3 + 2] = v.col.b * hk;
-      // nav lights: left red, right green, tail strobe white, belly beacon red
-      const cy = Math.cos(v.yaw), sy = Math.sin(v.yaw), ph = t + (f.phase || 0);
-      const L = [[-0.53, 0.0, 0.1, 1, 0.12, 0.15, 1], [0.53, 0.0, 0.1, 0.1, 1, 0.35, 1], [0, 0.02, 0.6, 1, 1, 1, (ph * 1.1) % 1 < 0.08 ? 1 : 0], [0, -0.07, 0, 1, 0.1, 0.1, (ph * 0.8) % 1 < 0.14 ? 1 : 0]];
-      for (let k = 0; k < 4; k++) {
-        const [lx, ly, lz, r, g, b, on] = L[k], j = (i * 4 + k) * 3;
-        lp[j] = v.pos.x + (lx * cy + lz * sy) * s; lp[j + 1] = v.pos.y + ly * s; lp[j + 2] = v.pos.z + (-lx * sy + lz * cy) * s;
-        const m = on * (0.35 + 0.65 * (1 - this.day * 0.6)); lc[j] = r * m; lc[j + 1] = g * m; lc[j + 2] = b * m;
+      if (!v) { v = { pos: new THREE.Vector3(tx, ty, tz), yaw: -f.trk * D2R, trail: [], last: 0, col: new THREE.Color() }; this.vis.set(f.id, v); }
+      else {
+        const p = v.pos, dx = tx - p.x, dy = ty - p.y, dz = tz - p.z;
+        if (dx * dx + dy * dy + dz * dz > 900) p.set(tx, ty, tz); else { p.x += dx * kLerp; p.y += dy * kLerp; p.z += dz * kLerp; }
       }
-      const gy = -curvDrop(v.pos.x, v.pos.z) + 0.05;
-      dp.set([v.pos.x, v.pos.y, v.pos.z, v.pos.x, gy, v.pos.z], i * 6);
-      v.index = i; i++;
+      v.yaw += ((((-f.trk * D2R - v.yaw) + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI) * kYaw;
+      const dist = cam.distanceTo(v.pos);
+      if (t - v.last > TRAIL_EVERY && dist < 2500) { v.last = t; v.trail.push({ x: u.x, y: u.y, z: u.z, a: f.alt }); if (v.trail.length > TRAIL_N - 1) v.trail.shift(); }
+      if (f.emg) v.col.copy(COL.emg); else altColor(f.alt, v.col);
+      const sel = f.id === selId, sc = clamp(dist * (ground ? 0.008 : 0.017), 0.03, 24) * (sel ? 1.35 : 1);
+      if (dist < 3000 || sel) {
+        s.copy(n).negate();
+        const pitch = clamp(Math.atan2(f.vr * this.altScale, f.spd + 1e-4) * 0.7, -0.22, 0.32), bank = clamp(-(f.turn || 0) * 0.14, -0.45, 0.45);
+        this.tmpE.set(pitch, v.yaw, bank, 'YXZ'); this.tmpQ2.setFromEuler(this.tmpE);
+        this.tmpQ.setFromRotationMatrix(this.tmpM.makeBasis(e, u, s)).multiply(this.tmpQ2);
+        this.tmpM.compose(v.pos, this.tmpQ, this.tmpS.setScalar(sc)); this.planes.setMatrixAt(ip, this.tmpM);
+        this.tmpC.copy(v.col).lerp(COL.white, sel ? 0.75 : 0.42); this.planes.setColorAt(ip, this.tmpC); ip++;
+      }
+      hp[i * 3] = v.pos.x; hp[i * 3 + 1] = v.pos.y; hp[i * 3 + 2] = v.pos.z;
+      const hk = sel ? 1 : 0.9; hc[i * 3] = v.col.r * hk; hc[i * 3 + 1] = v.col.g * hk; hc[i * 3 + 2] = v.col.b * hk;
+      // nav lights: left red, right green, tail strobe white, belly beacon red
+      const near = dist < 800, cy = Math.cos(v.yaw), sy = Math.sin(v.yaw), ph = t + (f.phase || 0);
+      for (let k = 0; k < 4; k++) {
+        const L = NAV[k], j = (i * 4 + k) * 3, on = k < 2 ? 1 : k === 2 ? ((ph * 1.1) % 1 < 0.08 ? 1 : 0) : ((ph * 0.8) % 1 < 0.14 ? 1 : 0);
+        if (near) {
+          const X = (L[0] * cy + L[2] * sy) * sc, Y = L[1] * sc, Z = (-L[0] * sy + L[2] * cy) * sc;
+          lp[j] = v.pos.x + e.x * X + u.x * Y - n.x * Z; lp[j + 1] = v.pos.y + e.y * X + u.y * Y - n.y * Z; lp[j + 2] = v.pos.z + e.z * X + u.z * Y - n.z * Z;
+        }
+        const m = near ? on * glow : 0; lc[j] = L[3] * m; lc[j + 1] = L[4] * m; lc[j + 2] = L[5] * m;
+      }
+      const j = i * 6, gr = EARTH_R + 0.05;
+      dp[j] = v.pos.x; dp[j + 1] = v.pos.y; dp[j + 2] = v.pos.z; dp[j + 3] = u.x * gr - O.x; dp[j + 4] = u.y * gr - O.y; dp[j + 5] = u.z * gr - O.z;
+      i++;
     }
     for (const id of this.vis.keys()) if (!seen.has(id)) this.vis.delete(id);
-    this.planes.count = i; this.planes.instanceMatrix.needsUpdate = true; if (this.planes.instanceColor) this.planes.instanceColor.needsUpdate = true;
+    this.planes.count = ip; this.planes.instanceMatrix.needsUpdate = true; if (this.planes.instanceColor) this.planes.instanceColor.needsUpdate = true;
     for (const p of [this.halo, this.lights]) { p.geometry.attributes.position.needsUpdate = true; p.geometry.attributes.color.needsUpdate = true; }
     this.halo.geometry.setDrawRange(0, i); this.lights.geometry.setDrawRange(0, i * 4);
     this.drops.geometry.attributes.position.needsUpdate = true; this.drops.geometry.setDrawRange(0, i * 2);
     if ((this.trailClock += dt) > 0.1) { this.trailClock = 0; this.buildTrails(flights); }
   }
   buildTrails(flights) {
-    let n = 0; const P = this.trailPos, C = this.trailCol, as = this.altScale;
-    for (const f of flights) {
-      const v = this.vis.get(f.id); if (!v) continue;
-      const tr = v.trail, m = tr.length;
-      let px = null, py, pz;
-      for (let k = 0; k <= m && n < MAXP * TRAIL_N; k++) {
-        let x, y, z;
-        if (k < m) { x = tr[k].x; z = tr[k].z; y = tr[k].a * as - curvDrop(x, z) + 0.05; } else { x = v.pos.x; y = v.pos.y; z = v.pos.z; }
-        if (px !== null) {
-          const j = n * 6, fa = 0.45 + 0.55 * (k - 1) / Math.max(1, m), fb = 0.45 + 0.55 * k / Math.max(1, m);
-          P[j] = px; P[j + 1] = py; P[j + 2] = pz; P[j + 3] = x; P[j + 4] = y; P[j + 5] = z;
-          C[j] = v.col.r * fa; C[j + 1] = v.col.g * fa; C[j + 2] = v.col.b * fa; C[j + 3] = v.col.r * fb; C[j + 4] = v.col.g * fb; C[j + 5] = v.col.b * fb;
-          n++;
+    let n = 0; const P = this.trailPos, C = this.trailCol, as = this.altScale, O = this.O, cam = this.camera.position;
+    if (this.cam.r < 4000 || this.mode === 'ground') {
+      const lim = (Math.min(this.cam.r, 1200) * 3 + 60) ** 2;
+      let list = [];
+      for (const f of flights) { const v = this.vis.get(f.id); if (v) { const d = v.pos.distanceToSquared(cam); if (d < lim) list.push([f, v, d]); } }
+      if (list.length > TRAIL_F) list = list.sort((a, b) => a[2] - b[2]).slice(0, TRAIL_F);
+      for (const [f, v] of list) {
+        if (!v.filled) this.backfill(f, v);
+        const tr = v.trail, m = tr.length;
+        let px = null, py, pz;
+        for (let k = 0; k <= m && n < TRAIL_F * TRAIL_N; k++) {
+          let x, y, z;
+          if (k < m) { const p = tr[k], rr = EARTH_R + p.a * as + 0.05; x = p.x * rr - O.x; y = p.y * rr - O.y; z = p.z * rr - O.z; } else { x = v.pos.x; y = v.pos.y; z = v.pos.z; }
+          if (px !== null) {
+            const j = n * 6, fa = 0.45 + 0.55 * (k - 1) / Math.max(1, m), fb = 0.45 + 0.55 * k / Math.max(1, m);
+            P[j] = px; P[j + 1] = py; P[j + 2] = pz; P[j + 3] = x; P[j + 4] = y; P[j + 5] = z;
+            C[j] = v.col.r * fa; C[j + 1] = v.col.g * fa; C[j + 2] = v.col.b * fa; C[j + 3] = v.col.r * fb; C[j + 4] = v.col.g * fb; C[j + 5] = v.col.b * fb;
+            n++;
+          }
+          px = x; py = y; pz = z;
         }
-        px = x; py = y; pz = z;
       }
     }
     const g = this.trails.geometry;
@@ -358,88 +333,202 @@ export class World {
     g.instanceCount = n;
   }
 
-  /* ---------- camera & input ---------- */
+  /* ---------- camera ---------- */
   setMode(m) {
-    const prev = this.mode; this.mode = m;
+    const prev = this.mode; this.mode = m; this.fly = null; this.inertia = null;
     if (m === 'top') { this.cam.phi = 0.02; this.cam.theta = 0; if (this.cam.r < 60) this.cam.r = 140; }
     if (m === 'orbit' && prev === 'top') { this.cam.phi = 1.0; }
     if (m === 'ground') { this.cam.fov = 62; }
+    if ((m === 'ground') !== (prev === 'ground')) this.snap = true;
   }
-  lookAtFlight(f) { const p = this.worldPos(f, this.tmpV); this.cam.yaw = Math.atan2(p.x, -p.z); this.cam.pitch = clamp(Math.atan2(p.y - 0.1, Math.hypot(p.x, p.z)), -0.1, 1.5); }
+  // tilt eases to straight down as you zoom out, so the whole globe sits centred
+  effPhi(r) { return Math.min(this.cam.phi, lerp(1.45, 0, smooth(1200, 9000, r))); }
+  lookAtRel(rel) { this.cam.yaw = rel.brg * D2R; this.cam.pitch = clamp(rel.elev * D2R, -0.1, 1.5); }
+
+  /** Animate to a place: along the great circle, pulling out to see both ends when they're far apart. */
+  flyTo(lat, lon, r, o = {}) {
+    const c = this.cam, a = { lat: c.lat, lon: c.lon, r: c.r, h: c.h, th: c.theta, ph: c.phi };
+    const b = { lat, lon, r: r ?? c.r, h: o.h ?? 2, th: o.theta ?? c.theta, ph: o.phi ?? c.phi };
+    b.th = a.th + ((((b.th - a.th) + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI);
+    this.inertia = null;
+    const d = haversine(a.lat, a.lon, b.lat, b.lon);
+    if (o.instant || reduced()) { this.fly = null; Object.assign(c, { lat: b.lat, lon: b.lon, r: b.r, h: b.h, theta: b.th, phi: b.ph }); this.snap = true; return; }
+    const peak = Math.max(a.r, b.r, Math.min(d * 1.2, 16000));
+    this.fly = { a, b, t: 0, bump: Math.log(peak) - Math.max(Math.log(a.r), Math.log(b.r)),
+      ua: unitDir(a.lat, a.lon, new THREE.Vector3()), ub: unitDir(b.lat, b.lon, new THREE.Vector3()),
+      dur: o.dur ?? clamp(0.8 + Math.log10(1 + d) * 0.4 + Math.abs(Math.log(b.r / a.r)) * 0.08, 0.8, 2.6) };
+  }
+  stepFly(dt) {
+    const f = this.fly, c = this.cam; f.t += dt;
+    const k = Math.min(1, f.t / f.dur), e = ease(k), ang = f.ua.angleTo(f.ub);
+    const p = ang < 1e-6 ? f.ub : this.tmpW.copy(f.ua).multiplyScalar(Math.sin((1 - e) * ang) / Math.sin(ang)).addScaledVector(f.ub, Math.sin(e * ang) / Math.sin(ang));
+    const ll = toLatLon(p.x, p.y, p.z); c.lat = ll.lat; c.lon = ll.lon;
+    c.r = Math.exp(lerp(Math.log(f.a.r), Math.log(f.b.r), e) + f.bump * 4 * e * (1 - e));
+    c.h = lerp(f.a.h, f.b.h, e); c.theta = lerp(f.a.th, f.b.th, e); c.phi = lerp(f.a.ph, f.b.ph, e);
+    if (k >= 1) this.fly = null;
+  }
+  /** Straight down from space to the observer, the opening shot. */
+  intro() { const h = this.homeLL; this.flyTo(h.lat, h.lon, HOME_R, { theta: 0.6, phi: 1.02, dur: reduced() ? 0 : 4.2 }); }
+  recenter() {
+    if (this.mode === 'ground') { this.cam.yaw = 0; this.cam.pitch = 0.4; return; }
+    const h = this.homeLL; this.flyTo(h.lat, h.lon, HOME_R, { theta: this.mode === 'top' ? 0 : 0.6, phi: this.mode === 'top' ? 0.02 : 1.02 });
+  }
+  pan(dx, dy) {
+    const c = this.cam, r = this.fol ? Math.min(c.r, 30) : c.r, phi = this.effPhi(r);
+    const k = 2 * r * Math.tan(this.camera.fov * D2R / 2) / this.h, kv = k / Math.max(Math.cos(phi), 0.3);
+    const st = Math.sin(c.theta), ct = Math.cos(c.theta);
+    let de = -dx * k * ct - dy * kv * st, dn = -dx * k * st + dy * kv * ct;
+    const m = Math.hypot(de, dn), cap = 3500; if (m > cap) { de *= cap / m; dn *= cap / m; }
+    c.lat = clamp(c.lat + dn / 111.195, -85, 85);
+    c.lon += de / (111.195 * Math.max(0.05, Math.cos(c.lat * D2R))); c.lon = ((c.lon + 540) % 360) - 180;
+  }
+  /** Where a screen point meets the ground, or null if it's off the globe. */
+  groundAt(sx, sy) {
+    const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2(sx / this.w * 2 - 1, -(sy / this.h) * 2 + 1), this.camera);
+    const oc = this.tmpW.copy(this.camera.position).add(this.O), b = oc.dot(ray.ray.direction), cc = oc.lengthSq() - EARTH_R * EARTH_R, disc = b * b - cc;
+    if (disc < 0) return null;
+    const t = -b - Math.sqrt(disc); if (t < 0) return null;
+    const p = oc.addScaledVector(ray.ray.direction, t); return toLatLon(p.x, p.y, p.z);
+  }
+  zoom(k, sx, sy) {
+    if (this.mode === 'ground') { this.cam.fov = clamp(this.cam.fov * k, 12, 85); return; }
+    const c = this.cam, r0 = c.r, r1 = clamp(r0 * k, 0.6, 26000); this.fly = null;
+    if (sx != null && !this.fol && (k < 1 || r0 < 3000)) {
+      const hit = this.groundAt(sx, sy);
+      if (hit) {
+        const a = unitDir(c.lat, c.lon, new THREE.Vector3()), b = unitDir(hit.lat, hit.lon, new THREE.Vector3()), ang = a.angleTo(b), f = 1 - r1 / r0;
+        if (ang > 1e-7 && ang < 1.2) {
+          const p = a.multiplyScalar(Math.sin((1 - f) * ang) / Math.sin(ang)).addScaledVector(b, Math.sin(f * ang) / Math.sin(ang)), ll = toLatLon(p.x, p.y, p.z);
+          c.lat = clamp(ll.lat, -85, 85); c.lon = ll.lon;
+        }
+      }
+    }
+    c.r = r1;
+  }
+
+  /* ---------- input: drag moves the map, right-drag (or shift/ctrl-drag, or two fingers) turns and tilts ---------- */
   bindInput() {
-    const el = this.canvas, ptrs = new Map(); let drag = null, pinch = 0;
-    this.lastInteract = -10;
+    const el = this.canvas, ptrs = new Map(); let drag = null, two = null;
+    const gesture = () => { const [a, b] = [...ptrs.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x), my: (a.y + b.y) / 2 }; };
+    const touch = () => { this.lastInteract = this.clock.elapsedTime; this.fly = null; this.onInteract && this.onInteract(); };
     el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerdown', e => {
-      el.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, moved: 0, pan: e.button === 2 || e.shiftKey || this.mode === 'top' };
-      if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch = Math.hypot(a.x - b.x, a.y - b.y); drag = null; }
-      this.lastInteract = this.clock.elapsedTime; this.introT = 99;
+      el.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }); this.inertia = null;
+      if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, moved: 0, rot: e.button === 2 || e.button === 1 || e.shiftKey || e.ctrlKey || e.altKey, vx: 0, vy: 0, t: performance.now() };
+      if (ptrs.size === 2) { two = gesture(); drag = null; }
+      touch();
     });
     el.addEventListener('pointermove', e => {
       if (!ptrs.has(e.pointerId)) return; ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y); if (pinch) this.zoom(pinch / d); pinch = d; return; }
+      const c = this.cam;
+      if (ptrs.size === 2 && two) {
+        const g = gesture(); this.zoom(two.d / g.d);
+        if (this.mode !== 'ground') { c.theta += ((g.a - two.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI; if (this.mode === 'orbit') c.phi = clamp(c.phi - (g.my - two.my) * 0.004, 0, 1.45); }
+        two = g; touch(); return;
+      }
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY; drag.moved += Math.abs(dx) + Math.abs(dy);
-      const c = this.cam;
       if (this.mode === 'ground') { c.yaw -= dx * 0.004 * c.fov / 60; c.pitch = clamp(c.pitch + dy * 0.004 * c.fov / 60, -0.2, 1.52); }
-      else if (drag.pan) {
-        const k = c.r * 0.0016, st = Math.sin(c.theta), ct = Math.cos(c.theta);
-        c.target.x -= (dx * ct + dy * st) * k; c.target.z -= (-dx * st + dy * ct) * k;
-        const lim = 180; c.target.x = clamp(c.target.x, -lim, lim); c.target.z = clamp(c.target.z, -lim, lim);
-        this.onPan && this.onPan();
-      } else { c.theta -= dx * 0.005; c.phi = clamp(c.phi - dy * 0.004, 0.05, 1.45); }
-      this.lastInteract = this.clock.elapsedTime;
+      else if (drag.rot && this.mode === 'orbit') { c.theta -= dx * 0.005; c.phi = clamp(c.phi - dy * 0.004, 0, 1.45); }
+      else if (drag.rot) c.theta -= dx * 0.005;
+      else {
+        if (this.fol && drag.moved > 6) this.onUnfollow && this.onUnfollow();
+        this.pan(dx, dy);
+        const now = performance.now(), ms = Math.max(8, now - drag.t); drag.t = now;
+        drag.vx = drag.vx * 0.3 + dx / ms * 1000 * 0.7; drag.vy = drag.vy * 0.3 + dy / ms * 1000 * 0.7;
+      }
+      touch();
     });
     const end = e => {
       if (drag && drag.moved < 6 && e.type === 'pointerup' && ptrs.size === 1) this.onPick && this.onPick(e.clientX, e.clientY);
-      ptrs.delete(e.pointerId); if (ptrs.size < 2) pinch = 0; if (!ptrs.size) drag = null;
+      else if (drag && !drag.rot && this.mode !== 'ground' && performance.now() - drag.t < 80 && Math.hypot(drag.vx, drag.vy) > 300 && !reduced()) this.inertia = { vx: drag.vx, vy: drag.vy };
+      ptrs.delete(e.pointerId); if (ptrs.size < 2) two = null; if (!ptrs.size) drag = null;
     };
     el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
-    el.addEventListener('wheel', e => { e.preventDefault(); this.zoom(Math.exp(e.deltaY * 0.0012)); this.lastInteract = this.clock.elapsedTime; }, { passive: false });
+    el.addEventListener('wheel', e => { e.preventDefault(); this.inertia = null; this.zoom(Math.exp(e.deltaY * 0.0012), e.clientX, e.clientY); touch(); }, { passive: false });
+    el.addEventListener('dblclick', e => {
+      if (this.mode === 'ground') return;
+      const hit = this.groundAt(e.clientX, e.clientY); if (hit) this.flyTo(hit.lat, hit.lon, Math.max(1, this.cam.r * 0.35), { dur: 0.9 });
+    });
   }
-  zoom(k) { if (this.mode === 'ground') this.cam.fov = clamp(this.cam.fov * k, 12, 85); else this.cam.r = clamp(this.cam.r * k, 3, 520); }
   resize(w, h) {
     this.w = w; this.h = h;
     this.renderer.setSize(w, h, false); this.composer.setSize(w, h);
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
     this.trailMat.resolution.set(w * this.renderer.getPixelRatio(), h * this.renderer.getPixelRatio());
   }
+  /** Screen position of a scene point. vis is false when it's off screen or hidden behind the earth. */
   project(v, out) {
     this.tmpS.copy(v).project(this.camera);
     out.vis = this.tmpS.z < 1 && Math.abs(this.tmpS.x) < 1.1 && Math.abs(this.tmpS.y) < 1.1;
-    out.x = (this.tmpS.x + 1) / 2 * this.w; out.y = (1 - this.tmpS.y) / 2 * this.h; return out;
-  }
-  frame(dt, t, followPos) {
-    const c = this.cam, want = this.mode === 'ground' ? 1 : 2.2;
-    this.altScale += (want - this.altScale) * (1 - Math.exp(-dt * 3));
-    if (this.introT < 3.6) {
-      this.introT += dt; const k = this.introT / 3.6, e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-      c.r = lerp(300, 95, e); c.phi = lerp(0.3, 1.02, e); c.theta = lerp(-0.6, 0.6, e);
-    } else if (this.mode === 'orbit' && t - this.lastInteract > 6 && !followPos && !matchMedia('(prefers-reduced-motion: reduce)').matches) c.theta += dt * 0.025;
-    let pos = this.tmpV, look = new THREE.Vector3(), fov = 50;
-    if (this.mode === 'ground') {
-      pos.set(0, 0.1, 0); fov = c.fov;
-      look.set(Math.sin(c.yaw) * Math.cos(c.pitch), 0.1 + Math.sin(c.pitch), -Math.cos(c.yaw) * Math.cos(c.pitch));
-    } else {
-      const tg = followPos || c.target;
-      const r = followPos ? Math.min(c.r, 30) : c.r;
-      pos.set(tg.x + r * Math.sin(c.phi) * Math.sin(c.theta), tg.y + r * Math.cos(c.phi), tg.z + r * Math.sin(c.phi) * Math.cos(c.theta));
-      look.copy(tg); fov = this.w < 700 ? 60 : 48;
+    out.x = (this.tmpS.x + 1) / 2 * this.w; out.y = (1 - this.tmpS.y) / 2 * this.h;
+    if (out.vis) {
+      const cam = this.camera.position, d = this.tmpS.copy(v).sub(cam), L = d.length(); d.divideScalar(L || 1);
+      const oc = this.tmpW.copy(cam).add(this.O), b = oc.dot(d), disc = b * b - (oc.lengthSq() - (EARTH_R - 0.3) ** 2);
+      if (disc > 0) { const t = -b - Math.sqrt(disc); if (t > 0 && t < L - 0.05) out.vis = false; }
     }
-    const k = this.introT < 3.6 ? 1 : 1 - Math.exp(-dt * 4);
-    this.curPos.lerp(pos, k); this.curLook.lerp(look, k);
-    this.camera.position.copy(this.curPos); this.camera.lookAt(this.curLook);
+    return out;
+  }
+  projectHome(v, out) { return this.project(this.tmpV.copy(v).applyMatrix4(this.homeGroup.matrix), out); }
+
+  frame(dt, t, followPos) {
+    const c = this.cam, ground = this.mode === 'ground';
+    this.altScale += ((ground ? 1 : 2.2) - this.altScale) * (1 - Math.exp(-dt * 3));
+    this.fol = !!followPos;
+    if (this.fly) this.stepFly(dt);
+    else if (this.inertia) {
+      const iv = this.inertia; this.pan(iv.vx * dt, iv.vy * dt); const k = Math.exp(-dt * 4); iv.vx *= k; iv.vy *= k;
+      if (Math.hypot(iv.vx, iv.vy) < 20) this.inertia = null;
+    } else if (this.mode === 'orbit' && t - this.lastInteract > 6 && !followPos && c.r < 1500 && !reduced()) c.theta += dt * 0.025;
+    if (followPos) { const ll = toLatLon(followPos.x + this.O.x, followPos.y + this.O.y, followPos.z + this.O.z); c.lat = ll.lat; c.lon = ll.lon; c.h = ll.h; }
+    // keep the floating origin near what we're looking at
+    const anchor = ground ? this.llToScene(this.homeLL.lat, this.homeLL.lon, 0, this.tmpV) : this.llToScene(c.lat, c.lon, c.h, this.tmpV);
+    if (anchor.length() > 250) this.rebase(anchor.clone());
+    const e = this.e, n = this.n, u = this.u, pos = new THREE.Vector3(), look = new THREE.Vector3(), up = new THREE.Vector3();
+    let fov;
+    if (ground) {
+      enu(this.homeLL.lat, this.homeLL.lon, e, n, u);
+      pos.copy(this.homePos).addScaledVector(u, 0.1); fov = c.fov;
+      look.copy(pos).addScaledVector(e, Math.sin(c.yaw) * Math.cos(c.pitch)).addScaledVector(n, Math.cos(c.yaw) * Math.cos(c.pitch)).addScaledVector(u, Math.sin(c.pitch));
+      up.copy(u);
+    } else {
+      const r = followPos ? Math.min(c.r, 30) : c.r, phi = this.effPhi(r);
+      enu(c.lat, c.lon, e, n, u);
+      look.copy(u).multiplyScalar(EARTH_R + c.h).sub(this.O);
+      const hv = this.hv.copy(e).multiplyScalar(Math.sin(c.theta)).addScaledVector(n, -Math.cos(c.theta));
+      pos.copy(look).addScaledVector(hv, r * Math.sin(phi)).addScaledVector(u, r * Math.cos(phi));
+      up.copy(hv).multiplyScalar(-Math.cos(phi)).addScaledVector(u, Math.sin(phi));
+      fov = this.w < 700 ? 60 : 48;
+    }
+    const k = this.snap ? 1 : 1 - Math.exp(-dt * (this.fly ? 14 : 6)); this.snap = false;
+    this.curPos.lerp(pos, k); this.curLook.lerp(look, k); this.curUp.lerp(up, k).normalize();
+    this.camera.position.copy(this.curPos); this.camera.up.copy(this.curUp); this.camera.lookAt(this.curLook);
     if (Math.abs(this.camera.fov - fov) > 0.01) { this.camera.fov += (fov - this.camera.fov) * (1 - Math.exp(-dt * 5)); this.camera.updateProjectionMatrix(); }
-    // clouds float at ~1.8 km (drawn with the same height exaggeration as aircraft)
-    this.cloud.visible = this.cloudsOn; this.cloud.position.y = 1.8 * this.altScale - 0.2;
+    // sky and stars travel with the camera; above the atmosphere the sky gives way to space
+    const camE = this.tmpW.copy(this.camera.position).add(this.O), alt = camE.length() - EARTH_R, localUp = camE.normalize();
+    this.sky.position.copy(this.camera.position); this.stars.position.copy(this.camera.position);
+    const su = this.sky.material.uniforms; su.up.value.copy(localUp);
+    const space = smooth(40, 260, alt);
+    su.rayleigh.value = 1.8 * (1 - space); su.mieCoefficient.value = 0.003 * (1 - space); su.turbidity.value = (this.turbidity || 2) * (1 - space) + 0.1;
+    this.sky.visible = alt < 300;
+    this.stars.material.opacity = Math.max(1 - smooth(-12, -2, this.sun ? this.sun.alt : 30), space);
+    this.hemi.position.copy(localUp); this.sunLight.position.copy(this.sunDir).multiplyScalar(500);
+    this.renderer.toneMappingExposure = lerp(lerp(0.62, 0.46, this.day), 0.6, space);
+    this.bloom.strength = lerp(lerp(0.75, 0.18, this.day), 0.3, space);
+    // haze: thick at ground level, thinner as you pull back, gone in space
+    const bf = this.baseFog || 0.0032;
+    const fd = ground ? Math.max(bf * 3, 0.009) : bf * clamp(110 / Math.max(1, this.curPos.distanceTo(this.curLook)), 0.2, 1) * (1 - smooth(60, 500, alt));
+    this.scene.fog.density = fd < this.scene.fog.density ? fd : this.scene.fog.density + (fd - this.scene.fog.density) * (1 - Math.exp(-dt * 3));
+    // things that belong to the observer fade once you're far from home
+    const dHome = this.camera.position.distanceTo(this.homePos);
+    this.cloud.visible = this.cloudsOn && dHome < 2500; this.cloud.position.y = 1.8 * this.altScale - 0.2;
     this.cloud.material.uniforms.uTime.value = t;
-    this.cloud.material.uniforms.uOpacity.value = this.mode === 'top' ? 0.35 : 0.9;
-    const pk = (t * 0.5) % 1; this.pulse.scale.setScalar(0.5 + pk * 6); this.pulse.material.opacity = 0.7 * (1 - pk); this.obs.visible = this.drops.visible = this.mode !== 'ground';
-    const bf = this.baseFog || 0.0032, fd = this.mode === 'ground' ? Math.max(bf * 3, 0.009) : bf * clamp(110 / this.curPos.distanceTo(this.curLook), 0.2, 1);
-    this.scene.fog.density += (fd - this.scene.fog.density) * (1 - Math.exp(-dt * 3));
-    const ps = clamp(this.curPos.length() * 0.012, 0.3, 4); this.pin.scale.setScalar(ps); this.pin.visible = this.mode !== 'ground';
-    for (const L of this.layers) if (L.dirty && t - (L.lastComp || 0) > 0.25) { L.lastComp = t; L.composite(); }
+    this.cloud.material.uniforms.uOpacity.value = (this.mode === 'top' ? 0.35 : 0.9) * (1 - smooth(700, 2500, dHome));
+    const pk = (t * 0.5) % 1; this.pulse.scale.setScalar(0.5 + pk * 6); this.pulse.material.opacity = 0.7 * (1 - pk);
+    this.obs.visible = !ground && dHome < 4000; this.drops.visible = !ground && c.r < 2500;
+    this.halo.material.size = lerp(26, 9, smooth(600, 6000, c.r));
+    this.pin.scale.setScalar(clamp(dHome * 0.012, 0.3, 4)); this.pin.visible = !ground;
+    this.globe.update(this.camera, this.O, this.h);
     this.composer.render();
   }
 }

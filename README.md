@@ -8,10 +8,13 @@
 
 ## Features
 
-- **Live aircraft** from community ADS-B networks (ADSB.lol, airplanes.live and adsb.fi), up to about 185 km around you, refreshed every 5 seconds.
+- **A whole live planet.** Squawk opens in space and drops down to you. Zoom out, or tap **Globe**, to spin the earth and watch live traffic across continents. Satellite tiles stream in as you zoom, with borders, place names and city lights on the night side.
+- **Live aircraft** from community ADS-B networks (ADSB.lol, airplanes.live and adsb.fi). Around you it refreshes every 5 seconds; look somewhere else and the feed follows the camera, with a wider radius the further out you zoom.
+- **Recentre anywhere.** Wherever you've wandered, *Back to home*, the ⌖ button or the **H** key flies you straight back.
 - **Use your current location**, search any city or airport, or jump to a busy sky: Heathrow, Dubai, Mumbai, New York and more.
 - **A real-world scene.** Satellite ground imagery with earth curvature. The sun's position is calculated for your location and time. Cloud cover, wind and haze come from live weather.
-- **Three camera views.** *Orbit* is the 3D overview. *Map* is top-down. *Ground view* puts you on the ground looking up at true angles, so the scene matches what you see outside.
+- **Camera views.** *Orbit* is the 3D overview. *Map* is top-down. *Globe* pulls out to see the planet. *Ground view* puts you on the ground looking up at true angles, so the scene matches what you see outside.
+- **Controls.** Drag to move, scroll or pinch to zoom, right-drag (or two fingers) to turn and tilt, double-click to zoom in on a spot.
 - **Time scrubber** to preview the sky at golden hour, sunset or night.
 - **Flight cards** with a photo of the actual aircraft (Planespotters.net), the route, altitude, speed, squawk code and a "where to look" sky dial.
 - **Tabs:**
@@ -49,10 +52,11 @@ Three.js r170 loads from jsDelivr through an import map. Geolocation needs `http
 index.html        UI shell and import map
 css/style.css     glass UI that follows day and night
 js/main.js        app state, live feed, labels, tabs, badges
-js/world.js       three.js scene: sky, satellite tiles, clouds, aircraft, trails, camera
+js/world.js       three.js scene: sky, clouds, aircraft, trails, globe camera and controls
+js/globe.js       streaming globe: map tiles on a sphere, place names, night lights, atmosphere
 js/data.js        airlines, aircraft types, airports and network sources
 js/sim.js         simulated traffic fallback
-js/geo.js         projection, earth curvature, sun position
+js/geo.js         projection, earth-centred frame, earth curvature, sun position
 serve.py          local server with a live-feed relay
 vercel.json       Vercel config that relays the feed
 _redirects        Netlify config that relays the feed
@@ -61,6 +65,6 @@ worker/           Cloudflare Worker relay for static hosts
 
 ## Data and credits
 
-Aircraft positions come from [ADSB.lol](https://adsb.lol), [airplanes.live](https://airplanes.live) and [adsb.fi](https://adsb.fi), and routes from ADSB.lol. Photos come from [Planespotters.net](https://www.planespotters.net), weather from [Open-Meteo](https://open-meteo.com), and geocoding from [OpenStreetMap Nominatim](https://nominatim.openstreetmap.org). Imagery is © Esri, Maxar and Earthstar Geographics. Map tiles are © OpenStreetMap contributors and © CARTO. The 3D rendering uses [three.js](https://threejs.org).
+Aircraft positions come from [ADSB.lol](https://adsb.lol), [airplanes.live](https://airplanes.live) and [adsb.fi](https://adsb.fi), and routes from [adsbdb.com](https://www.adsbdb.com). Photos come from [Planespotters.net](https://www.planespotters.net), weather from [Open-Meteo](https://open-meteo.com), and geocoding from [OpenStreetMap Nominatim](https://nominatim.openstreetmap.org). Imagery, borders and place names are © Esri, Maxar and Earthstar Geographics. City lights are NASA Black Marble via [NASA GIBS](https://earthdata.nasa.gov/gibs). Map tiles are © OpenStreetMap contributors and © CARTO. The 3D rendering uses [three.js](https://threejs.org).
 
 Squawk is for spotting fun, not for navigation.

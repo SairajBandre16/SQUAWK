@@ -21,7 +21,7 @@
 </script>
 </head>
 <body>
-<canvas id="gl" aria-label="3D view of live aircraft around your location. Drag to rotate, scroll to zoom, click an aircraft for details."></canvas>
+<canvas id="gl" aria-label="3D globe of live aircraft, centred on your location. Drag to move, scroll to zoom, right-drag to turn and tilt, click an aircraft for details. Press H to come back home."></canvas>
 <div id="labels" aria-hidden="true"></div>
 
 <!-- loader -->
@@ -66,6 +66,8 @@
 <div class="pop pop-right" id="layersPop" hidden role="dialog" aria-label="Display settings">
   <p class="pop-h">Ground</p>
   <div class="seg" id="styleSeg"><button data-v="satellite">Satellite</button><button data-v="map">Map</button></div>
+  <p class="pop-h">Borders and place names</p>
+  <div class="seg" id="namesSeg"><button data-v="on">On</button><button data-v="off">Off</button></div>
   <p class="pop-h">Clouds</p>
   <div class="seg" id="cloudSeg"><button data-v="on">Live weather</button><button data-v="off">Off</button></div>
   <p class="pop-h">Labels</p>
@@ -121,6 +123,7 @@
 
 <div class="toast" id="toast" hidden><b id="toastHead">LOOK UP</b><span id="toastText"></span></div>
 <div class="badge-toast" id="badgeToast" hidden></div>
+<div class="hint" id="hint" hidden></div>
 
 <div class="hud-bl">
   <div class="ro"><p class="k">In range</p><p class="v" id="rCount">0</p><p class="s" id="rCountS">aircraft within 185 km</p></div>
@@ -129,8 +132,12 @@
 </div>
 
 <div class="hud-bc">
+  <div class="explore" id="explore" hidden>
+    <span id="exploreT">Exploring</span>
+    <button class="btn primary" id="recenterBtn"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>Back to <span id="recenterName">home</span></button>
+  </div>
   <div class="seg view" id="viewSeg" role="group" aria-label="Camera">
-    <button data-v="orbit" aria-pressed="true">Orbit</button><button data-v="top" aria-pressed="false">Map</button><button data-v="ground" aria-pressed="false">Ground view</button>
+    <button data-v="orbit" aria-pressed="true">Orbit</button><button data-v="top" aria-pressed="false">Map</button><button data-v="globe" aria-pressed="false">Globe</button><button data-v="ground" aria-pressed="false">Ground view</button>
   </div>
   <div class="time">
     <button class="live-btn" id="liveBtn" aria-pressed="true">Live sky</button>
@@ -142,7 +149,7 @@
 
 <div class="hud-br">
   <div class="legend" aria-hidden="true"><div class="bar"></div><ul><li>FL380</li><li>FL190</li><li>0 ft</li></ul></div>
-  <div class="zoom"><button id="zIn" aria-label="Zoom in">+</button><button id="zOut" aria-label="Zoom out">−</button><button id="zHome" aria-label="Back to your location">⌖</button></div>
+  <div class="zoom"><button id="zIn" aria-label="Zoom in">+</button><button id="zOut" aria-label="Zoom out">−</button><button id="zHome" aria-label="Recentre on your location (H)" title="Recentre on your location (H)">⌖</button></div>
 </div>
 
 <noscript><p class="nojs">Squawk needs JavaScript and WebGL to draw the sky.</p></noscript>
