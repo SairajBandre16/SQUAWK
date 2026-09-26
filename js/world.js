@@ -482,7 +482,7 @@ export class World {
     });
     const end = e => {
       if (drag && drag.moved < 6 && e.type === 'pointerup' && ptrs.size === 1) this.onPick && this.onPick(e.clientX, e.clientY);
-      else if (drag && !drag.rot && this.mode !== 'ground' && performance.now() - drag.t < 80 && Math.hypot(drag.vx, drag.vy) > 300 && !reduced()) this.inertia = { vx: drag.vx, vy: drag.vy };
+      else if (drag && !drag.rot && this.mode !== 'ground' && performance.now() - drag.t < 80 && Math.hypot(drag.vx, drag.vy) > 300 && !reduced()) { const v = Math.hypot(drag.vx, drag.vy), k = Math.min(1, 2200 / v); this.inertia = { vx: drag.vx * k, vy: drag.vy * k }; }
       ptrs.delete(e.pointerId); if (ptrs.size < 2) two = null; if (!ptrs.size) drag = null;
     };
     el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
