@@ -761,9 +761,9 @@ function updateExplore() {
 // the next plane to pass within a few km of you, counting down
 function updateNext() {
   const age = S.pred.at ? (Date.now() - S.pred.at) / 1000 : 0, x = S.pred.over.find(o => o.t - age > 0);
-  $('rNextBox').dataset.id = x ? x.f.id : '';
+  $('rNextBox').dataset.id = x ? x.f.id : ''; $('rNextBox').hidden = !x;
   $('rNext').textContent = x ? mmss(x.t - age) : '—';
-  $('rNextS').textContent = x ? `${x.f.callsign} · ${Math.round(x.elev)}° ${P16[pt16(x.brg)]}` : 'none in 15 min';
+  $('rNextS').textContent = x ? `${x.f.callsign} · ${x.d < 1 ? 'right overhead' : Math.round(x.elev) + '° ' + P16[pt16(x.brg)]}` : '';
   $('rNextBox').classList.toggle('soon', !!x && x.t - age < 60);
 }
 $('rNextBox').onclick = () => { const id = $('rNextBox').dataset.id; if (id && S.flights.has(id)) { select(id); setFollow(true); } };

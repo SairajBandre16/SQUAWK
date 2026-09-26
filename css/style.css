@@ -129,11 +129,13 @@ button.chip{color:var(--ink);cursor:pointer}
 .explore{display:flex;align-items:center;gap:12px;padding:6px 6px 6px 16px;border-radius:14px;background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid var(--line);box-shadow:var(--shadow);animation:pop .35s cubic-bezier(.2,1.4,.4,1)}
 .explore>span{font-family:var(--f-mono);font-size:11px;color:var(--ink-2);white-space:nowrap}
 .explore .btn{padding:8px 12px}
-.ro.next{text-align:left;font:inherit;color:inherit;cursor:pointer}
-.ro.next span{display:block}
-.ro.next:hover{border-color:var(--accent)}
-.ro.next.soon{background:var(--accent);color:#fff;border-color:var(--accent);animation:pulse 1.2s ease-in-out infinite}
-.ro.next.soon .k,.ro.next.soon .s{color:rgba(255,255,255,.85)}
+.next-pill{display:flex;align-items:center;gap:10px;padding:7px 14px;border-radius:999px;border:1px solid var(--line);background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:var(--shadow);animation:pop .35s cubic-bezier(.2,1.4,.4,1)}
+.next-pill .k{font-family:var(--f-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+.next-pill b{font-family:var(--f-display);font-weight:800;font-size:22px;line-height:1;font-variant-numeric:tabular-nums}
+.next-pill span:last-child{font-family:var(--f-mono);font-size:11px;color:var(--ink-2);white-space:nowrap}
+.next-pill:hover{border-color:var(--accent)}
+.next-pill.soon{background:var(--accent);border-color:var(--accent);color:#fff;animation:pulse 1.2s ease-in-out infinite}
+.next-pill.soon .k,.next-pill.soon span:last-child{color:rgba(255,255,255,.88)}
 @keyframes pulse{50%{box-shadow:0 0 0 8px rgba(255,90,31,.18),var(--shadow)}}
 .ping{position:fixed;top:calc(env(safe-area-inset-top,0px) + var(--gap) + 130px);left:50%;transform:translateX(-50%);z-index:16;display:flex;gap:12px;align-items:center;max-width:min(600px,calc(100vw - 32px));
   background:#0E1726;color:#fff;padding:10px 16px;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.14);font-weight:500;font-size:13.5px;cursor:pointer;animation:pop .45s cubic-bezier(.2,1.4,.4,1)}
