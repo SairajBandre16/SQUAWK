@@ -415,7 +415,7 @@ export class World {
     this.altScale += (want - this.altScale) * (1 - Math.exp(-dt * 3));
     if (this.introT < 3.6) {
       this.introT += dt; const k = this.introT / 3.6, e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-      c.r = lerp(420, 95, e); c.phi = lerp(0.25, 1.02, e); c.theta = lerp(-0.6, 0.6, e);
+      c.r = lerp(300, 95, e); c.phi = lerp(0.3, 1.02, e); c.theta = lerp(-0.6, 0.6, e);
     } else if (this.mode === 'orbit' && t - this.lastInteract > 6 && !followPos && !matchMedia('(prefers-reduced-motion: reduce)').matches) c.theta += dt * 0.025;
     let pos = this.tmpV, look = new THREE.Vector3(), fov = 50;
     if (this.mode === 'ground') {
@@ -436,7 +436,7 @@ export class World {
     this.cloud.material.uniforms.uTime.value = t;
     this.cloud.material.uniforms.uOpacity.value = this.mode === 'top' ? 0.35 : 0.9;
     const pk = (t * 0.5) % 1; this.pulse.scale.setScalar(0.5 + pk * 6); this.pulse.material.opacity = 0.7 * (1 - pk); this.obs.visible = this.mode !== 'ground';
-    const fd = this.mode === 'ground' ? Math.max((this.baseFog || 0.0032) * 3, 0.009) : (this.baseFog || 0.0032);
+    const bf = this.baseFog || 0.0032, fd = this.mode === 'ground' ? Math.max(bf * 3, 0.009) : bf * clamp(110 / this.curPos.distanceTo(this.curLook), 0.2, 1);
     this.scene.fog.density += (fd - this.scene.fog.density) * (1 - Math.exp(-dt * 3));
     const ps = clamp(this.curPos.length() * 0.012, 0.3, 4); this.pin.scale.setScalar(ps); this.pin.visible = this.mode !== 'ground';
     for (const L of this.layers) if (L.dirty && t - (L.lastComp || 0) > 0.25) { L.lastComp = t; L.composite(); }
