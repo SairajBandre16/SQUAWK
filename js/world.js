@@ -8,12 +8,12 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { Globe, TILE_STYLES } from './globe.js';
+import { MODELS, modelGeometry, modelSize } from './models.js';
 import { D2R, EARTH_R, clamp, lerp, smooth, curvDrop, sunPosition, unitDir, enu, toLatLon, haversine, step } from './geo.js';
 
 export { TILE_STYLES };
@@ -65,23 +65,6 @@ function glowTexture() {
   const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
   gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.28, 'rgba(255,255,255,0.7)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
   g.fillStyle = gr; g.fillRect(0, 0, 64, 64); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
-}
-
-function planeGeometry() {
-  const shear = (g, k) => { const p = g.attributes.position; for (let i = 0; i < p.count; i++) p.setZ(i, p.getZ(i) + Math.abs(p.getX(i)) * k); g.computeVertexNormals(); return g; };
-  const parts = [
-    new THREE.CylinderGeometry(0.045, 0.056, 1, 12).rotateX(Math.PI / 2),
-    new THREE.ConeGeometry(0.056, 0.17, 12).rotateX(-Math.PI / 2).translate(0, 0, -0.585),
-    new THREE.ConeGeometry(0.045, 0.12, 12).rotateX(Math.PI / 2).translate(0, 0.01, 0.56),
-    shear(new THREE.BoxGeometry(1.02, 0.018, 0.17), 0.32).translate(0, -0.015, -0.02),
-    shear(new THREE.BoxGeometry(0.36, 0.014, 0.085), 0.35).translate(0, 0.02, 0.43),
-    new THREE.BoxGeometry(0.014, 0.19, 0.13).translate(0, 0.105, 0.46),
-    new THREE.CylinderGeometry(0.034, 0.03, 0.15, 10).rotateX(Math.PI / 2).translate(0.23, -0.055, -0.06),
-    new THREE.CylinderGeometry(0.034, 0.03, 0.15, 10).rotateX(Math.PI / 2).translate(-0.23, -0.055, -0.06)
-  ];
-  const fin = parts[5].attributes.position; for (let i = 0; i < fin.count; i++) fin.setZ(i, fin.getZ(i) + fin.getY(i) * 0.7);
-  parts[5].computeVertexNormals();
-  return mergeGeometries(parts.map(g => g.toNonIndexed()));
 }
 
 export class World {
@@ -179,6 +162,7 @@ export class World {
   /* ---------- ground ---------- */
   setStyle(style) { this.style = style; this.globe.setStyle(style); }
   setNames(on) { this.globe.setNames(on); }
+  setRadar(on) { this.globe.setRadar(on); }
   tileProgress() { return this.globe.progress; }
 
   buildClouds() {
@@ -217,11 +201,14 @@ export class World {
 
   /* ---------- aircraft ---------- */
   buildAircraft() {
+    // one body and one tail InstancedMesh per aircraft family; the tail carries the airline colour
     const mat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.38, metalness: 0.25, emissive: '#1b2230' });
-    this.planes = new THREE.InstancedMesh(planeGeometry(), mat, MAXP);
-    this.planes.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.planes.count = 0; this.planes.frustumCulled = false;
-    this.planes.setColorAt(0, new THREE.Color(1, 1, 1));
-    this.scene.add(this.planes);
+    const tmat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.5, metalness: 0.1, emissive: '#10141c' });
+    this.models = {};
+    for (const k of MODELS) {
+      const g = modelGeometry(k), mk = (geo, m) => { const im = new THREE.InstancedMesh(geo, m, MAXP); im.instanceMatrix.setUsage(THREE.DynamicDrawUsage); im.count = 0; im.frustumCulled = false; im.setColorAt(0, new THREE.Color(1, 1, 1)); this.scene.add(im); return im; };
+      this.models[k] = { body: mk(g.body, mat), tail: mk(g.tail, tmat), size: modelSize(k), n: 0 };
+    }
     const glow = glowTexture();
     const mk = (n, size, blending, opacity) => {
       const g = new THREE.BufferGeometry();
@@ -260,6 +247,7 @@ export class World {
     const lp = this.lights.geometry.attributes.position.array, lc = this.lights.geometry.attributes.color.array, dp = this.drops.geometry.attributes.position.array;
     const kLerp = 1 - Math.exp(-dt * 5), kYaw = 1 - Math.exp(-dt * 4), glow = 0.35 + 0.65 * (1 - this.day * 0.6);
     let i = 0, ip = 0; // i: every aircraft (halo dot); ip: aircraft near enough to draw as a 3D model
+    for (const k in this.models) this.models[k].n = 0;
     for (const f of flights) {
       if (i >= MAXP) break;
       seen.add(f.id);
@@ -281,8 +269,10 @@ export class World {
         const pitch = clamp(Math.atan2(f.vr * this.altScale, f.spd + 1e-4) * 0.7, -0.22, 0.32), bank = clamp(-(f.turn || 0) * 0.14, -0.45, 0.45);
         this.tmpE.set(pitch, v.yaw, bank, 'YXZ'); this.tmpQ2.setFromEuler(this.tmpE);
         this.tmpQ.setFromRotationMatrix(this.tmpM.makeBasis(e, u, s)).multiply(this.tmpQ2);
-        this.tmpM.compose(v.pos, this.tmpQ, this.tmpS.setScalar(sc)); this.planes.setMatrixAt(ip, this.tmpM);
-        this.tmpC.copy(v.col).lerp(COL.white, sel ? 0.75 : 0.42); this.planes.setColorAt(ip, this.tmpC); ip++;
+        const M = this.models[f.model] || this.models.narrow, j = M.n++;
+        this.tmpM.compose(v.pos, this.tmpQ, this.tmpS.setScalar(sc * M.size)); M.body.setMatrixAt(j, this.tmpM); M.tail.setMatrixAt(j, this.tmpM);
+        this.tmpC.copy(v.col).lerp(COL.white, sel ? 0.75 : 0.42); M.body.setColorAt(j, this.tmpC);
+        if (f.livery) this.tmpC.set(f.livery).lerp(COL.white, sel ? 0.3 : 0); M.tail.setColorAt(j, this.tmpC); ip++;
       }
       hp[i * 3] = v.pos.x; hp[i * 3 + 1] = v.pos.y; hp[i * 3 + 2] = v.pos.z;
       const hk = sel ? 1 : 0.9; hc[i * 3] = v.col.r * hk; hc[i * 3 + 1] = v.col.g * hk; hc[i * 3 + 2] = v.col.b * hk;
@@ -301,7 +291,10 @@ export class World {
       i++;
     }
     for (const id of this.vis.keys()) if (!seen.has(id)) this.vis.delete(id);
-    this.planes.count = ip; this.planes.instanceMatrix.needsUpdate = true; if (this.planes.instanceColor) this.planes.instanceColor.needsUpdate = true;
+    for (const k in this.models) {
+      const M = this.models[k];
+      for (const im of [M.body, M.tail]) { if (!im.count && !M.n) continue; im.count = M.n; im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true; }
+    }
     for (const p of [this.halo, this.lights]) { p.geometry.attributes.position.needsUpdate = true; p.geometry.attributes.color.needsUpdate = true; }
     this.halo.geometry.setDrawRange(0, i); this.lights.geometry.setDrawRange(0, i * 4);
     this.drops.geometry.attributes.position.needsUpdate = true; this.drops.geometry.setDrawRange(0, i * 2);
@@ -522,7 +515,7 @@ export class World {
     else if (this.inertia) {
       const iv = this.inertia; this.pan(iv.vx * dt, iv.vy * dt); const k = Math.exp(-dt * 4); iv.vx *= k; iv.vy *= k;
       if (Math.hypot(iv.vx, iv.vy) < 20) this.inertia = null;
-    } else if (this.mode === 'orbit' && t - this.lastInteract > 6 && !followPos && c.r < 1500 && !reduced()) c.theta += dt * 0.025;
+    } else if (this.mode === 'orbit' && (t - this.lastInteract > 6 || this.cinematic) && !followPos && c.r < 1500 && !reduced()) c.theta += dt * (this.cinematic ? 0.05 : 0.025);
     if (followPos) { const ll = toLatLon(followPos.x + this.O.x, followPos.y + this.O.y, followPos.z + this.O.z); c.lat = ll.lat; c.lon = ll.lon; c.h = ll.h; }
     // keep the floating origin near what we're looking at
     const anchor = ground ? this.llToScene(this.homeLL.lat, this.homeLL.lon, 0, this.tmpV) : this.llToScene(c.lat, c.lon, c.h, this.tmpV);

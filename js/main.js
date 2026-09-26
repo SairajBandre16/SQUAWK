@@ -5,6 +5,7 @@ import { Sim } from './sim.js';
 import { Proj, relative, P16, P16L, pt16, clamp, haversine, curvDrop, step, sunPosition, moonPosition } from './geo.js';
 import { closestApproach, transits, contrailAt, pressureAt } from './predict.js';
 import { Sats } from './sats.js';
+import { modelOf, LIVERY } from './models.js';
 
 const $ = id => document.getElementById(id);
 const IN_RANGE = 185, FEED_NM = 100, POLL_MS = 5000;
@@ -12,7 +13,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 };
-const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', names: true, sats: true, alerts: false, relay: '' }, store.get('squawk.settings', {}));
+const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', names: true, sats: true, radar: false, alerts: false, relay: '' }, store.get('squawk.settings', {}));
 { const q = new URLSearchParams(location.search).get('relay'); if (q) settings.relay = q; }
 D.feedConfig.relayUrl = settings.relay;
 const saveSettings = () => store.set('squawk.settings', settings);
@@ -26,6 +27,7 @@ const boardAlt = km => { const ft = km * 3280.84; return ft >= 5000 ? 'FL' + Str
 const kt = f => Math.round(f.spd * 1943.84);
 const fpm = f => Math.round(f.vr * 196850 / 50) * 50;
 const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
+const dur = s => s < 90 ? Math.round(s) + ' s' : s < 3600 ? Math.round(s / 60) + ' min' : Math.floor(s / 3600) + ' h ' + String(Math.round(s % 3600 / 60)).padStart(2, '0') + ' min';
 const mmss = t => t >= 3600 ? Math.floor(t / 3600) + 'h ' + String(Math.floor(t % 3600 / 60)).padStart(2, '0') + 'm' : Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
 const hhmm = d => { const off = S.weather?.utcOffset; const x = off != null ? new Date(d.getTime() + off * 1000) : d; return off != null ? String(x.getUTCHours()).padStart(2, '0') + ':' + String(x.getUTCMinutes()).padStart(2, '0') : x.toTimeString().slice(0, 5); };
 const rel = f => relative(f, S.proj);
@@ -189,10 +191,12 @@ function tickSats(force) {
 // The feed can hold thousands of aircraft from around the world. Only the ones that come within IN_RANGE of you
 // count as catches for the log, badges and events.
 function addFlight(f) {
-  f.id = f.id || f.hex; f.phase = Math.random() * 3; f.emg = D.isEmergency(f); f.quiet = S.booting;
+  f.id = f.id || f.hex; f.phase = Math.random() * 3; f.emg = D.isEmergency(f); f.quiet = S.booting; dress(f);
   S.flights.set(f.id, f);
   if (f.emg) emergency(f);
 }
+// which 3D model and tail colour to draw
+function dress(f) { f.model = modelOf(f.type, f.cat); f.livery = LIVERY[D.airlineCode(f.callsign)] || null; }
 function catchFlight(f) {
   f.caught = true; S.quiet = f.quiet; logCatch(f); S.quiet = false;
   if (!f.quiet && D.HEAVY.has(f.type)) pushEvent('heavy', `${f.callsign}, a ${D.typeName(f)}, is in range at ${fmtAlt(f.alt)}`);
@@ -215,7 +219,7 @@ function ingest(list) {
     const trk = a.track ?? a.true_heading ?? a.mag_heading;
     const f = S.flights.get(id);
     if (!f) addFlight({ id, trk: trk ?? 0, turn: 0, ...d });
-    else { const was = f.emg; Object.assign(f, d); if (trk != null) f.trk = trk; f.emg = D.isEmergency(f); if (f.emg && !was) emergency(f); }
+    else { const was = f.emg, ty = f.type; Object.assign(f, d); if (trk != null) f.trk = trk; f.emg = D.isEmergency(f); if (f.emg && !was) emergency(f); if (ty !== f.type) dress(f); }
   }
   const stale = staleAfter(); for (const [id, f] of S.flights) if (now - f.lastFix > stale) removeFlight(id);
 }
@@ -441,6 +445,20 @@ function updateCard() {
     else if (f.kind === 'arr') prog = clamp(100 - f.d, 60, 98); else if (f.kind === 'dep') prog = clamp(f.flown / 30, 2, 40);
     $('cProg').style.width = prog + '%'; $('cPlaneIco').style.left = prog + '%';
   }
+  // time to landing and time since take-off, from the great-circle distance at the current ground speed
+  let eta = '';
+  if (rt && rt.to.lat != null && f.spd > 0.05 && f.lat != null) {
+    const left = haversine(f.lat, f.lon, rt.to.lat, rt.to.lon) / f.spd, gone = rt.from.lat != null ? haversine(rt.from.lat, rt.from.lon, f.lat, f.lon) / f.spd : null;
+    eta = `Lands in about <b>${dur(left)}</b> (${hhmm(new Date(Date.now() + left * 1000))} here)` + (gone != null && gone > 300 ? ` · left ${esc(rt.from.name || rt.from.iata)} about ${dur(gone)} ago` : '');
+  }
+  $('cEta').hidden = !eta; $('cEta').innerHTML = eta;
+  const h = f.hist || [];
+  $('cProf').hidden = h.length < 3;
+  if (h.length >= 3) {
+    const t0 = h[0][0], t1 = h[h.length - 1][0], top = Math.max(12.5, ...h.map(x => x[1])), X = t => ((t - t0) / Math.max(1, t1 - t0) * 300).toFixed(1), Y = a => (58 - a / top * 54).toFixed(1);
+    const pts = h.map(x => X(x[0]) + ',' + Y(x[1])).join(' ');
+    $('cProfL').setAttribute('points', pts); $('cProfA').setAttribute('points', `0,60 ${pts} 300,60`); $('cProfT').textContent = dur((t1 - t0) / 1000);
+  }
   const p = pt16(r.brg);
   const home = settings.place.name.split(',')[0];
   $('cLook').textContent = r.d > 600 ? `Too far to see from ${home}` : r.elev < 0.5 ? `${cap(P16L[p])}, below your horizon` : `${cap(P16L[p])}, ${Math.round(r.elev)}° up`;
@@ -500,8 +518,11 @@ document.addEventListener('pointerdown', e => {
   for (const [o, b] of [['placePop', 'placeBtn'], ['layersPop', 'layersBtn']]) if (!$(o).hidden && !$(o).contains(e.target) && !$(b).contains(e.target) && !$('feedChip').contains(e.target)) togglePop(o, b, false);
 });
 document.addEventListener('keydown', e => {
-  if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName)) { recenter(); return; }
+  const typing = /INPUT|TEXTAREA/.test(document.activeElement?.tagName) || e.ctrlKey || e.metaKey || e.altKey;
+  if ((e.key === 'h' || e.key === 'H') && !typing) { recenter(); return; }
+  if ((e.key === 'p' || e.key === 'P') && !typing) { setPhoto(!document.body.classList.contains('photo')); return; }
   if (e.key !== 'Escape') return;
+  if (document.body.classList.contains('photo')) { setPhoto(false); return; }
   if (!$('placePop').hidden || !$('layersPop').hidden) { togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false); }
   else if (S.selId) select(null); else if (S.tab !== 'sky') setTab('sky');
 });
@@ -541,10 +562,40 @@ bindSeg('styleSeg', () => settings.style, v => { settings.style = v; saveSetting
 bindSeg('namesSeg', () => settings.names ? 'on' : 'off', v => { settings.names = v === 'on'; saveSettings(); world.setNames(settings.names); });
 bindSeg('cloudSeg', () => settings.clouds ? 'on' : 'off', v => { settings.clouds = v === 'on'; saveSettings(); world.cloudsOn = settings.clouds; });
 bindSeg('labelSeg', () => settings.labels, v => { settings.labels = v; saveSettings(); });
+bindSeg('radarSeg', () => settings.radar ? 'on' : 'off', v => { settings.radar = v === 'on'; saveSettings(); world.setRadar(settings.radar); });
 bindSeg('satSeg', () => settings.sats ? 'on' : 'off', v => { settings.sats = v === 'on'; saveSettings(); if (settings.sats) startSats(); });
 $('tileCredit').textContent = TILE_STYLES[settings.style].credit;
-world.setStyle(settings.style); world.setNames(settings.names);
+world.setStyle(settings.style); world.setNames(settings.names); world.setRadar(settings.radar);
 world.cloudsOn = settings.clouds;
+
+/* ---------------- phone bottom sheets: drag the handle down to close, up to expand ---------------- */
+function sheet(el, close) {
+  const g = el.querySelector('.grab'); let y0 = null, dy = 0;
+  g.addEventListener('pointerdown', e => { y0 = e.clientY; dy = 0; g.setPointerCapture(e.pointerId); el.classList.add('dragging'); });
+  g.addEventListener('pointermove', e => { if (y0 == null) return; dy = e.clientY - y0; el.style.transform = `translateY(${Math.max(dy, -40)}px)`; });
+  const end = () => {
+    if (y0 == null) return; y0 = null; el.classList.remove('dragging'); el.style.transform = '';
+    if (dy > 90) { el.classList.remove('tall'); close(); } else if (dy < -50) el.classList.add('tall'); else if (dy > 30) el.classList.remove('tall');
+  };
+  g.addEventListener('pointerup', end); g.addEventListener('pointercancel', end);
+}
+sheet($('panel'), () => setTab('sky')); sheet($('card'), () => select(null));
+
+/* ---------------- photo mode ---------------- */
+function setPhoto(on) {
+  document.body.classList.toggle('photo', on); $('photoBar').hidden = !on; world.cinematic = on;
+  if (on) { togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false); }
+}
+$('photoBtn').onclick = () => setPhoto(true); $('photoExit').onclick = () => setPhoto(false);
+$('shotBtn').onclick = () => {
+  // draw a fresh frame and copy it before the browser clears the buffer, then add a small caption
+  world.composer.render();
+  const src = world.renderer.domElement, c = document.createElement('canvas'); c.width = src.width; c.height = src.height;
+  const g = c.getContext('2d'); g.drawImage(src, 0, 0);
+  const k = c.width / innerWidth, pad = 22 * k, text = `SQUAWK · ${settings.place.name} · ${new Date().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}`;
+  g.font = `600 ${15 * k}px 'Martian Mono', monospace`; g.fillStyle = 'rgba(0,0,0,.35)'; g.fillText(text, pad + k, c.height - pad + k); g.fillStyle = '#fff'; g.fillText(text, pad, c.height - pad);
+  c.toBlob(b => { if (!b) return; const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `squawk-${Date.now()}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }, 'image/png');
+};
 
 /* ---------------- tabs & panels ---------------- */
 const TAB_META = { next: ['Coming up', 460], board: ['Overhead board', 720], stats: ['Sky stats', 440], weather: ['Spotting weather', 420], log: ['Spotter\'s log', 460], codes: ['Squawk codes', 440] };
@@ -672,8 +723,17 @@ function statsHTML() {
   <div><p class="sec-h">Aircraft size</p><div class="hbars">${[...cats.entries()].filter(([, n]) => n).map(([n, c]) => bar(n, c, cmax)).join('')}</div></div>
   <div><p class="sec-h">Records this session</p><div class="records">${rt('fast', 'Fastest', v => v + ' kt')}${rt('high', 'Highest', v => fmtAlt(v))}${rt('far', 'Farthest seen', v => Math.round(v) + ' km')}${rt('near', 'Closest pass', v => v.toFixed(1) + ' km')}</div></div>`;
 }
+// altitude history for the flight card's profile: every 10 s, for aircraft near home and the one you've selected
+let histT = 0;
+function tickHistory() {
+  const now = Date.now(); if (now - histT < 10000) return; histT = now;
+  for (const f of S.flights.values()) {
+    if (f.id !== S.selId && (Math.abs(f.lat - S.proj.lat0) > 6 || Math.abs(f.lon - S.proj.lon0) > 9)) continue;
+    (f.hist || (f.hist = [])).push([now, f.alt]); if (f.hist.length > 60) f.hist.shift();
+  }
+}
 function tickRecords() {
-  const R = S.rec;
+  const R = S.rec; tickHistory();
   for (const f of S.flights.values()) {
     const r = rel(f); if (r.d > IN_RANGE) continue;
     if (!f.caught) catchFlight(f);

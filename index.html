@@ -51,6 +51,7 @@
   </nav>
   <div class="top-right">
     <button class="chip" id="feedChip" data-mode="boot" aria-label="Live feed status"><i></i><span id="feedLabel">Connecting</span></button>
+    <button class="icon-btn" id="photoBtn" aria-label="Photo mode (P)" title="Photo mode (P)"><svg viewBox="0 0 24 24"><path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg></button>
     <button class="icon-btn" id="layersBtn" aria-haspopup="dialog" aria-expanded="false" aria-label="Map and display settings"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5zm-9 9l9 5 9-5M3 16l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button>
   </div>
 </header>
@@ -72,6 +73,8 @@
   <div class="seg" id="namesSeg"><button data-v="on">On</button><button data-v="off">Off</button></div>
   <p class="pop-h">Clouds</p>
   <div class="seg" id="cloudSeg"><button data-v="on">Live weather</button><button data-v="off">Off</button></div>
+  <p class="pop-h">Rain radar</p>
+  <div class="seg" id="radarSeg"><button data-v="on">On</button><button data-v="off">Off</button></div>
   <p class="pop-h">Satellites</p>
   <div class="seg" id="satSeg"><button data-v="on">On</button><button data-v="off">Off</button></div>
   <p class="pop-h">Labels</p>
@@ -84,12 +87,14 @@
 
 <!-- tab panel -->
 <section class="panel" id="panel" hidden aria-live="polite">
+  <div class="grab" aria-hidden="true"></div>
   <div class="panel-head"><h2 id="panelTitle"></h2><button class="icon-btn" id="panelClose" aria-label="Close panel">✕</button></div>
   <div class="panel-body" id="panelBody"></div>
 </section>
 
 <!-- flight card -->
 <aside class="card" id="card" hidden aria-live="polite">
+  <div class="grab" aria-hidden="true"></div>
   <div class="photo" id="cPhoto"><div class="ph-empty" id="cPhotoEmpty">No photo yet</div></div>
   <div class="card-in">
     <div class="card-head">
@@ -102,6 +107,7 @@
       <div class="rbar"><i id="cProg"></i><svg viewBox="0 0 24 24" id="cPlaneIco"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/></svg></div>
       <div class="ap r"><b id="cTo"></b><span id="cToN"></span></div>
     </div>
+    <p class="eta" id="cEta" hidden></p>
     <div class="look">
       <svg viewBox="0 0 120 120" aria-hidden="true">
         <circle cx="60" cy="60" r="52" class="dial"/><circle cx="60" cy="60" r="34.7" class="dial dash"/><circle cx="60" cy="60" r="17.3" class="dial dash"/>
@@ -117,6 +123,7 @@
       <div><dt>Track</dt><dd id="cTrk"></dd></div><div><dt>Vertical</dt><dd id="cVs"></dd></div>
       <div><dt>Registration</dt><dd id="cReg"></dd></div><div><dt>Phase</dt><dd id="cPhase"></dd></div>
     </dl>
+    <div class="prof" id="cProf" hidden><p class="k">Altitude, last <span id="cProfT">10 min</span></p><svg viewBox="0 0 300 60" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="profG" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#FF9F1C"/><stop offset=".45" stop-color="#FF3D8B"/><stop offset="1" stop-color="#29C5FF"/></linearGradient></defs><polygon id="cProfA" fill="url(#profG)" opacity=".22"/><polyline id="cProfL" fill="none" stroke="url(#profG)" stroke-width="2.2" vector-effect="non-scaling-stroke"/></svg></div>
     <div class="card-actions">
       <button class="btn" id="cFollow" aria-pressed="false">Follow</button>
       <button class="btn" id="cGround">See it from the ground</button>
@@ -156,6 +163,11 @@
 <div class="hud-br">
   <div class="legend" aria-hidden="true"><div class="bar"></div><ul><li>FL380</li><li>FL190</li><li>0 ft</li></ul></div>
   <div class="zoom"><button id="zIn" aria-label="Zoom in">+</button><button id="zOut" aria-label="Zoom out">−</button><button id="zHome" aria-label="Recentre on your location (H)" title="Recentre on your location (H)">⌖</button></div>
+</div>
+
+<div class="photo-bar" id="photoBar" hidden>
+  <button class="btn primary" id="shotBtn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M4 17v3h16v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Save photo</button>
+  <button class="btn" id="photoExit">Done</button>
 </div>
 
 <noscript><p class="nojs">Squawk needs JavaScript and WebGL to draw the sky.</p></noscript>

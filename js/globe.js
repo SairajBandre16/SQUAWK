@@ -11,8 +11,11 @@ export const TILE_STYLES = {
 };
 const AUX = {
   names: { url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/${z}/${y}/${x}`, maxZ: 13 },
-  lights: { url: (z, x, y) => `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/${z}/${y}/${x}.png`, maxZ: 8 }
+  lights: { url: (z, x, y) => `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/${z}/${y}/${x}.png`, maxZ: 8 },
+  // RainViewer's latest radar frame; the path changes every 10 minutes and deeper zooms borrow zoom 7
+  radar: { base: null, url: (z, x, y) => `${AUX.radar.base}/256/${z}/${x}/${y}/2/1_1.png`, maxZ: 7 }
 };
+const KINDS = ['names', 'lights', 'radar'], UNI = { names: ['uNameTex', 'uNameXf'], lights: ['uLightTex', 'uLightXf'], radar: ['uRadarTex', 'uRadarXf'] };
 const ROOTZ = 1, SSE = 300, MAX_TILES = 520, MAX_AUX = 260, MAX_LOADS = 12, BUILDS_PER_FRAME = 6;
 const NONE = 0, LOADING = 1, LOADED = 2, READY = 3, FAILED = 4;
 const tileLat = (y, z) => Math.atan(Math.sinh(Math.PI - 2 * Math.PI * y / 2 ** z)) * R2D;
@@ -33,7 +36,7 @@ function patch(shared, own) {
     sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nuniform vec3 uCenter;\nvarying vec3 vGN;')
       .replace('#include <fog_vertex>', '#include <fog_vertex>\nvGN = (modelMatrix * vec4(position, 1.0)).xyz - uCenter;');
     sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
-uniform vec3 uSun; uniform float uNames, uLights; uniform sampler2D uNameTex, uLightTex; uniform vec4 uNameXf, uLightXf; varying vec3 vGN;`)
+uniform vec3 uSun; uniform float uNames, uLights, uRadar; uniform sampler2D uNameTex, uLightTex, uRadarTex; uniform vec4 uNameXf, uLightXf, uRadarXf; varying vec3 vGN;`)
       .replace('#include <map_fragment>', `#include <map_fragment>
 {
   float ndl = dot(normalize(vGN), uSun), day = smoothstep(-0.12, 0.1, ndl), gold = 1.0 - smoothstep(0.035, 0.31, ndl);
@@ -43,6 +46,7 @@ uniform vec3 uSun; uniform float uNames, uLights; uniform sampler2D uNameTex, uL
   diffuseColor.rgb *= mix(0.14, 1.0, day) * vec3(1.0, mix(0.9, 1.0, 1.0 - gold * 0.4), mix(0.82, 1.0, 1.0 - gold * 0.5));
   #ifdef USE_MAP
   if (uLightXf.z > 0.0) { vec3 c = texture2D(uLightTex, uLightXf.xy + vMapUv * uLightXf.z).rgb; diffuseColor.rgb += c * c * vec3(1.0, 0.82, 0.58) * (1.0 - smoothstep(-0.18, 0.04, ndl)) * uLights * 1.5; }
+  if (uRadarXf.z > 0.0) { vec4 r = texture2D(uRadarTex, uRadarXf.xy + vMapUv * uRadarXf.z); diffuseColor.rgb = mix(diffuseColor.rgb, r.rgb, r.a * uRadar * 0.85); }
   #endif
 }`);
   };
@@ -88,7 +92,7 @@ export class Globe {
   constructor(renderer, scene) {
     this.group = new THREE.Group(); scene.add(this.group);
     this.aniso = renderer.capabilities.getMaxAnisotropy();
-    this.U = { uSun: { value: new THREE.Vector3(0, 1, 0) }, uCenter: { value: new THREE.Vector3() }, uNames: { value: 1 }, uLights: { value: 1 } };
+    this.U = { uSun: { value: new THREE.Vector3(0, 1, 0) }, uCenter: { value: new THREE.Vector3() }, uNames: { value: 1 }, uLights: { value: 1 }, uRadar: { value: 0 } };
     this.tiles = new Map(); this.aux = new Map(); this.built = []; this.shown = []; this.pre = [];
     this.frame = 0; this.loading = 0; this.style = 'satellite'; this.namesOn = true;
     this.frustum = new THREE.Frustum(); this.pm = new THREE.Matrix4(); this.sph = new THREE.Sphere(); this.camE = new THREE.Vector3();
@@ -123,6 +127,18 @@ export class Globe {
     this.roots(); if (this.preAt) this.prefetch(this.preAt.lat, this.preAt.lon);
   }
   setNames(on) { this.namesOn = on; this.U.uNames.value = on ? 1 : 0; }
+  async setRadar(on) {
+    this.radarOn = on; this.U.uRadar.value = on ? 1 : 0; clearInterval(this.radarT);
+    if (!on) return;
+    const refresh = async () => {
+      try {
+        const j = await (await fetch('https://api.rainviewer.com/public/weather-maps.json', { cache: 'no-store' })).json(), f = j.radar?.past?.at(-1);
+        if (!f || AUX.radar.base === j.host + f.path) return;
+        AUX.radar.base = j.host + f.path; this.dropAux('radar');
+      } catch (e) { /* radar unavailable */ }
+    };
+    await refresh(); this.radarT = setInterval(refresh, 10 * 60e3);
+  }
   setSun(v) { this.U.uSun.value.copy(v); }
 
   /** Queue the tiles you'll need around a place before the camera gets there. */
@@ -179,7 +195,7 @@ export class Globe {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx);
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), t.rad);
-    t.own = { uNameTex: { value: null }, uNameXf: { value: new THREE.Vector4() }, uLightTex: { value: null }, uLightXf: { value: new THREE.Vector4() } };
+    t.own = {}; for (const k of KINDS) { t.own[UNI[k][0]] = { value: null }; t.own[UNI[k][1]] = { value: new THREE.Vector4() }; }
     const mat = new THREE.MeshBasicMaterial({ map: tex, fog: true });
     mat.onBeforeCompile = patch(this.U, t.own); mat.customProgramCacheKey = () => 'globe-tile';
     t.mesh = new THREE.Mesh(g, mat); t.mesh.frustumCulled = false; t.mesh.visible = false; this.group.add(t.mesh);
@@ -192,9 +208,9 @@ export class Globe {
 
   /* place-name overlay and night lights come from other tile sets; deeper tiles borrow a corner of an ancestor's image */
   bindAux(t) {
-    for (const kind of ['names', 'lights']) {
-      if (kind === 'names' && (!this.namesOn || !TILE_STYLES[this.style].names)) { t.own.uNameXf.value.z = 0; continue; }
-      const A = AUX[kind]; if (t.z > A.maxZ && kind === 'names') { t.own.uNameXf.value.z = 0; continue; }
+    for (const kind of KINDS) {
+      const u = t.own[UNI[kind][0]], xf = t.own[UNI[kind][1]].value, A = AUX[kind];
+      if ((kind === 'names' && (!this.namesOn || !TILE_STYLES[this.style].names || t.z > A.maxZ)) || (kind === 'radar' && (!this.radarOn || !A.base))) { xf.z = 0; continue; }
       const za = Math.min(t.z, A.maxZ), k = 2 ** (t.z - za), key = kind + za + '/' + Math.floor(t.x / k) + '/' + Math.floor(t.y / k);
       let a = this.aux.get(key);
       if (!a) {
@@ -205,7 +221,6 @@ export class Globe {
         }, () => {});
       }
       a.used = this.frame;
-      const u = kind === 'names' ? t.own.uNameTex : t.own.uLightTex, xf = kind === 'names' ? t.own.uNameXf.value : t.own.uLightXf.value;
       if (!a.tex) { xf.z = 0; continue; }
       u.value = a.tex; xf.set((t.x % k) / k, 1 - (t.y % k) / k - 1 / k, 1 / k, 0);
     }
@@ -243,9 +258,12 @@ export class Globe {
   }
   evictAux() {
     const old = [...this.aux.entries()].filter(([, a]) => a.used < this.frame - 2).sort((a, b) => a[1].used - b[1].used);
-    for (let n = this.aux.size - Math.floor(MAX_AUX * 0.8), i = 0; n > 0 && i < old.length; n--, i++) {
-      const [k, a] = old[i]; this.aux.delete(k);
-      if (a.tex) { for (const t of this.tiles.values()) if (t.own) { if (t.own.uNameTex.value === a.tex) { t.own.uNameTex.value = null; t.own.uNameXf.value.z = 0; } if (t.own.uLightTex.value === a.tex) { t.own.uLightTex.value = null; t.own.uLightXf.value.z = 0; } } a.tex.dispose(); }
-    }
+    for (let n = this.aux.size - Math.floor(MAX_AUX * 0.8), i = 0; n > 0 && i < old.length; n--, i++) this.freeAux(...old[i]);
   }
+  freeAux(k, a) {
+    this.aux.delete(k); if (!a.tex) return;
+    for (const t of this.tiles.values()) if (t.own) for (const kind of KINDS) { const u = t.own[UNI[kind][0]]; if (u.value === a.tex) { u.value = null; t.own[UNI[kind][1]].value.z = 0; } }
+    a.tex.dispose();
+  }
+  dropAux(kind) { for (const [k, a] of [...this.aux.entries()]) if (k.startsWith(kind)) this.freeAux(k, a); }
 }
