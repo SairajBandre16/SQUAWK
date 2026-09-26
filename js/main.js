@@ -6,6 +6,7 @@ import { Proj, relative, P16, P16L, pt16, clamp, haversine, curvDrop, step, sunP
 import { closestApproach, transits, contrailAt, pressureAt } from './predict.js';
 import { Sats } from './sats.js';
 import { modelOf, LIVERY } from './models.js';
+import { FAMILIES, familyOf, levelOf, XP, missionsFor, today, streak, plainFacts, silhouette } from './spotter.js';
 
 const $ = id => document.getElementById(id);
 const IN_RANGE = 185, FEED_NM = 100, POLL_MS = 5000;
@@ -45,7 +46,7 @@ addEventListener('resize', resize); resize();
 
 /* ---------------- log & badges ---------------- */
 const LOGKEY = 'squawk.log.v2';
-const newLog = () => ({ types: {}, airlines: {}, badges: {}, tracked: 0, since: Date.now() });
+const newLog = () => ({ types: {}, airlines: {}, badges: {}, tracked: 0, since: Date.now(), xp: 0, seen: 0, seenTypes: {}, days: [], day: null });
 const logLive = Object.assign(newLog(), store.get(LOGKEY, {}));
 const logSim = newLog();
 const theLog = () => (S.mode === 'live' ? logLive : logSim);
@@ -54,6 +55,7 @@ const saveLog = () => { clearTimeout(saveT); saveT = setTimeout(() => store.set(
 const ICON_STAR = '<svg viewBox="0 0 24 24"><path d="M12 2l2.9 6.3 6.9.7-5.2 4.6 1.5 6.8L12 17l-6.1 3.4 1.5-6.8L2.2 9l6.9-.7z"/></svg>';
 const BADGES = [
   { id: 'first', name: 'First contact', desc: 'Track your first aircraft' },
+  { id: 'eyes', name: 'Eyes on the sky', desc: 'See a plane with your own eyes and log it' },
   { id: 'heavy', name: 'Heavy metal', desc: 'Spot a widebody heavy' },
   { id: 'a380', name: 'Superjumbo', desc: 'Spot an Airbus A380' },
   { id: 'b747', name: 'Queen of the Skies', desc: 'Spot a Boeing 747' },
@@ -71,6 +73,7 @@ const BADGES = [
 ];
 function award(id) {
   const lg = theLog(); if (lg.badges[id]) return; lg.badges[id] = Date.now(); if (lg === logLive) saveLog();
+  gain(XP.badge);
   if (S.booting || S.quiet) return;
   const b = BADGES.find(x => x.id === id); const el = $('badgeToast');
   el.innerHTML = `<span class="star">${ICON_STAR}</span><span>Badge unlocked: <b>${esc(b.name)}</b></span>`; el.hidden = false;
@@ -79,13 +82,15 @@ function award(id) {
 }
 function localHour() { const off = S.weather?.utcOffset; const d = new Date(Date.now() + S.timeOff * 3600e3); return off != null ? new Date(d.getTime() + off * 1000).getUTCHours() : d.getHours(); }
 function logCatch(f) {
-  const lg = theLog(); lg.tracked++;
+  const lg = theLog(); lg.tracked++; gain(XP.catch);
   if (f.type) {
     const fresh = !lg.types[f.type], t = lg.types[f.type] || (lg.types[f.type] = { n: 0, first: Date.now(), al: [] }); t.n++;
     const an = D.airlineName(f.callsign); if (an && !t.al.includes(an) && t.al.length < 5) t.al.push(an);
-    if (fresh && !S.booting && !S.quiet && Object.keys(lg.types).length > 1) pushEvent('badge', `New type for your log: ${D.typeName(f)} (${f.callsign})`);
+    if (fresh) { gain(XP.type); if (!S.booting && !S.quiet && Object.keys(lg.types).length > 1) pushEvent('badge', `New type for your log: ${D.typeName(f)} (${f.callsign})`); }
   }
-  const ac = D.airlineCode(f.callsign); if (ac) lg.airlines[ac] = (lg.airlines[ac] || 0) + 1;
+  const ac = D.airlineCode(f.callsign); if (ac) { if (!lg.airlines[ac]) gain(XP.airline); lg.airlines[ac] = (lg.airlines[ac] || 0) + 1; }
+  const d = dayRec(); if (f.type && !d.types.includes(f.type)) d.types.push(f.type); if (ac && !d.airlines.includes(ac)) d.airlines.push(ac);
+  mission({ heavy: D.HEAVY.has(f.type), alt: f.alt, model: f.model, ctr: f.ctr, cs: f.callsign });
   award('first');
   if (D.HEAVY.has(f.type)) award('heavy');
   if (f.type === 'A388') award('a380');
@@ -98,6 +103,94 @@ function logCatch(f) {
   const nt = Object.keys(lg.types).length; if (nt >= 15) award('types15'); if (nt >= 40) award('types40');
   if (lg === logLive) saveLog();
 }
+
+/* ---------------- levels, missions and real sightings ---------------- */
+function gain(n) {
+  const lg = theLog(), before = levelOf(lg.xp || 0).n; lg.xp = (lg.xp || 0) + n;
+  if (lg === logLive) saveLog();
+  paintLevel();
+  if (S.booting || S.quiet) return;
+  floatXP(n);
+  const L = levelOf(lg.xp);
+  if (L.n > before) { flash(`Level ${L.n}: <b>${esc(L.name)}</b>`); pushEvent('badge', `You reached level ${L.n}, ${L.name}`); confetti(); }
+}
+function flash(html) {
+  const el = $('badgeToast'); el.innerHTML = `<span class="star">${ICON_STAR}</span><span>${html}</span>`; el.hidden = false;
+  clearTimeout(award.t); award.t = setTimeout(() => { el.hidden = true; }, 4200);
+}
+function dayRec() {
+  const lg = theLog(), d = today();
+  if (!lg.day || lg.day.date !== d) lg.day = { date: d, airlines: [], types: [], done: {} };
+  lg.days = lg.days || []; if (!lg.days.includes(d)) { lg.days.push(d); if (lg.days.length > 400) lg.days.shift(); }
+  return lg.day;
+}
+function mission(e) {
+  const d = dayRec();
+  for (const m of missionsFor(d.date)) if (!d.done[m.id] && m.check(d, e)) {
+    d.done[m.id] = Date.now(); gain(XP.mission);
+    if (!S.booting && !S.quiet) { flash(`Mission done: <b>${esc(m.text)}</b>`); pushEvent('badge', `Daily mission done: ${m.text}`); }
+  }
+}
+function paintLevel() {
+  const L = levelOf(theLog().xp || 0), el = $('lvlChip');
+  el.textContent = 'Lv ' + L.n; el.style.setProperty('--p', Math.round(L.pct * 100) + '%'); el.title = `${L.name} · ${L.xp} XP`;
+}
+function floatXP(n) {
+  if (n < 2) return;
+  const el = document.createElement('span'); el.className = 'xp-float'; el.textContent = `+${n} XP`;
+  const r = $('lvlChip').getBoundingClientRect(); el.style.left = r.left + r.width / 2 + 'px'; el.style.top = r.bottom + 'px';
+  document.body.appendChild(el); setTimeout(() => el.remove(), 1400);
+}
+function confetti() {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const box = document.createElement('div'); box.className = 'confetti';
+  for (let i = 0; i < 44; i++) { const s = document.createElement('i'); s.style.cssText = `left:${Math.random() * 100}%;background:${['#FF5A1F', '#FFC53D', '#29C5FF', '#FF3D8B', '#22C55E'][i % 5]};animation-delay:${Math.random() * 0.3}s;--dx:${(Math.random() - 0.5) * 160}px;--r:${Math.random() * 720}deg`; box.appendChild(s); }
+  document.body.appendChild(box); setTimeout(() => box.remove(), 2200);
+}
+/** "I saw it!": a real sighting, worth more than tracking it on screen. */
+function sawIt(f) {
+  if (!f || f.seen) return;
+  const lg = theLog(); f.seen = true; lg.seen = (lg.seen || 0) + 1; lg.seenTypes = lg.seenTypes || {};
+  const key = f.type || '?', first = !lg.seenTypes[key]; lg.seenTypes[key] = (lg.seenTypes[key] || 0) + 1;
+  gain(XP.seen + (first && f.type ? XP.seenType : 0)); mission({ seen: true }); award('eyes'); confetti();
+  pushEvent('badge', `You saw ${f.callsign} with your own eyes${first && f.type ? `, your first ${D.typeName(f)}` : ''}`);
+  if (lg === logLive) saveLog();
+  if (S.selId === f.id) updateCard();
+}
+
+/* ---------------- first-sighting guide ---------------- */
+// Walks a newcomer through finding a real plane in the sky, once, then gets out of the way.
+const coach = { on: false, id: null, skip: new Set(), later: false };
+function coachPick() {
+  let best = null, bs = -1e9;
+  for (const { f, r } of inRange()) {
+    if (coach.skip.has(f.id) || r.elev < 8 || r.elev > 75 || r.d > 50 || f.alt < 0.3) continue;
+    const s = r.elev - r.d * 0.4 + (['wide', 'jumbo', 'a380', 'quad'].includes(f.model) ? 12 : 0);
+    if (s > bs) { bs = s; best = f; }
+  }
+  return best;
+}
+function coachStart() {
+  if (coach.on || coach.later || store.get('squawk.coach', false) || S.mode === 'boot' || document.body.classList.contains('photo')) return;
+  const f = coachPick(); if (!f) return;
+  coach.on = true; coach.id = f.id; $('coach').hidden = false; coachShow(f, true);
+}
+function coachShow(f, fresh) {
+  const r = rel(f), fists = Math.max(1, Math.round(r.elev / 10)), night = world.day < 0.35;
+  $('coachText').innerHTML = `Step outside and face <b>${esc(P16L[pt16(r.brg)])}</b>. Look <b>${Math.round(r.elev)}°</b> up, about ${fists} fist${fists > 1 ? 's' : ''} above the horizon with your arm held out.
+    <span>${esc(f.callsign)} is ${/^[AEIOU]/.test(D.typeName(f)) ? 'an' : 'a'} ${esc(D.typeName(f))}, ${r.d.toFixed(1)} km away at ${fmtAlt(f.alt)}.${night ? ' At night, look for a steady light with a blinking red or white strobe.' : f.ctr && f.ctr !== 'none' ? ' It may be drawing a white contrail.' : ''}</span>`;
+  if (fresh) { select(f.id); setView('ground'); world.lookAtRel(r); }
+}
+function coachTick() {
+  if (!coach.on) { if (loaderDone && performance.now() - bootT > 14000) coachStart(); return; }
+  const f = S.flights.get(coach.id), r = f && rel(f);
+  if (!f || r.d > 70 || r.elev < 3) { coach.skip.add(coach.id); const n = coachPick(); if (n) { coach.id = n.id; coachShow(n, true); } else coachEnd(false); return; }
+  coachShow(f, false);
+}
+function coachEnd(done) { coach.on = false; $('coach').hidden = true; if (done) store.set('squawk.coach', true); else coach.later = true; }
+$('coachSaw').onclick = () => { sawIt(S.flights.get(coach.id)); coachEnd(true); flash('<b>First sighting!</b> That plane is now in your log.'); };
+$('coachNext').onclick = () => { coach.skip.add(coach.id); const n = coachPick(); if (n) { coach.id = n.id; coachShow(n, true); } else coachEnd(false); };
+$('coachLater').onclick = () => coachEnd(false);
 
 /* ---------------- events ---------------- */
 const EV_COL = { land: 'var(--low)', heavy: 'var(--mid)', over: '#22C55E', emg: 'var(--emg)', badge: 'var(--accent)', info: 'var(--high)' };
@@ -425,7 +518,10 @@ function phase(f) {
   if (f.alt > 8 && Math.abs(v) < 400) return 'Cruising';
   return v > 300 ? 'Climbing' : v < -300 ? 'Descending' : 'Level flight';
 }
-const routeOf = f => f.kind !== 'live' ? f.route : D.getRoute(f.callsign);
+// adsbdb matches routes by callsign, and callsigns get reused, so drop a route the aircraft is nowhere near
+const routeFits = (f, rt) => rt.from.lat == null || rt.to.lat == null || f.lat == null ||
+  haversine(rt.from.lat, rt.from.lon, f.lat, f.lon) + haversine(f.lat, f.lon, rt.to.lat, rt.to.lon) < haversine(rt.from.lat, rt.from.lon, rt.to.lat, rt.to.lon) * 1.2 + 250;
+const routeOf = f => { if (f.kind !== 'live') return f.route; const rt = D.getRoute(f.callsign); return rt && routeFits(f, rt) ? rt : null; };
 function updateCard() {
   const f = S.flights.get(S.selId); if (!f) return;
   const r = rel(f);
@@ -447,7 +543,7 @@ function updateCard() {
   }
   // time to landing and time since take-off, from the great-circle distance at the current ground speed
   let eta = '';
-  if (rt && rt.to.lat != null && f.spd > 0.05 && f.lat != null) {
+  if (rt && rt.to.lat != null && f.spd > 0.05 && f.alt > 0.1 && f.lat != null) {
     const left = haversine(f.lat, f.lon, rt.to.lat, rt.to.lon) / f.spd, gone = rt.from.lat != null ? haversine(rt.from.lat, rt.from.lon, f.lat, f.lon) / f.spd : null;
     eta = `Lands in about <b>${dur(left)}</b> (${hhmm(new Date(Date.now() + left * 1000))} here)` + (gone != null && gone > 300 ? ` · left ${esc(rt.from.name || rt.from.iata)} about ${dur(gone)} ago` : '');
   }
@@ -473,6 +569,10 @@ function updateCard() {
   $('cTrk').textContent = String(Math.round(f.trk)).padStart(3, '0') + '° ' + P16[pt16(f.trk)];
   const v = fpm(f); $('cVs').textContent = Math.abs(v) < 100 ? 'Level' : (v > 0 ? '+' : '−') + Math.abs(v).toLocaleString('en') + ' ft/min';
   $('cReg').textContent = f.reg || '—'; $('cPhase').textContent = phase(f);
+  const fam = familyOf(f.type), facts = plainFacts(f, r);
+  $('cFact').hidden = !fam && !facts.length; $('cFact').innerHTML = (fam ? `<b>${esc(fam.name)}.</b> ${esc(fam.fact)} ` : '') + esc(facts.join(' '));
+  const canSee = r.d < 120 && r.elev > 1;
+  $('cSaw').hidden = !canSee && !f.seen; $('cSaw').disabled = !!f.seen; $('cSaw').lastChild.textContent = f.seen ? 'In your log as seen' : 'I saw it!';
   const rr = 52 * (1 - clamp(r.elev, 0, 90) / 90), x = 60 + Math.sin(r.brg * Math.PI / 180) * rr, y = 60 - Math.cos(r.brg * Math.PI / 180) * rr;
   $('dLine').setAttribute('x2', x.toFixed(1)); $('dLine').setAttribute('y2', y.toFixed(1)); $('dDot').setAttribute('cx', x.toFixed(1)); $('dDot').setAttribute('cy', y.toFixed(1));
 }
@@ -481,6 +581,8 @@ function setFollow(on) {
   if (S.follow && S.view !== 'orbit') setView('orbit');
 }
 $('cClose').onclick = () => select(null);
+$('cSaw').onclick = () => sawIt(S.flights.get(S.selId));
+$('lvlChip').onclick = e => { e.stopPropagation(); setTab('log'); };
 $('cFollow').onclick = () => setFollow(!S.follow);
 $('cGround').onclick = () => { const f = S.flights.get(S.selId); if (!f) return; setFollow(false); setView('ground'); world.lookAtRel(rel(f)); };
 world.onUnfollow = () => setFollow(false);
@@ -617,7 +719,7 @@ function renderPanel(fresh) {
   else if (S.tab === 'next') { body.innerHTML = nextHTML(); for (const b of body.querySelectorAll('[data-id]')) b.onclick = () => { if (S.flights.has(b.dataset.id)) { select(b.dataset.id); setFollow(true); } }; for (const b of body.querySelectorAll('.alert-btn')) b.onclick = toggleAlerts; paintAlerts(); }
   else if (S.tab === 'stats') body.innerHTML = statsHTML();
   else if (S.tab === 'weather') { if (fresh || !renderPanel.wxDone) { body.innerHTML = weatherHTML(); renderPanel.wxDone = true; } }
-  else if (S.tab === 'log') body.innerHTML = logHTML();
+  else if (S.tab === 'log') { body.innerHTML = logHTML(); $('shareBtn').onclick = shareLog; }
   else if (S.tab === 'codes' && fresh) body.innerHTML = codesHTML();
   if (fresh) renderPanel.wxDone = S.tab === 'weather';
 }
@@ -682,13 +784,27 @@ function nextHTML() {
   const lv = (S.weather?.levels || []).map(l => ({ l, c: contrailAt(isaKm(l.p), S.weather.levels) })).filter(x => x.c && x.c.state !== 'none');
   const ctr = !S.weather?.levels ? 'Waiting for upper-air weather.' : lv.length ? `Contrails likely from ${fl(isaKm(lv[0].l.p))} upward${lv.some(x => x.c.state === 'persistent') ? ', and they should linger and spread' : ', but they should fade quickly'}. Planes making one show a white trail in the 3D view.` : 'The air up high is too warm or dry for contrails right now. Planes will leave clean skies.';
   const sec = (h, list, empty) => `<div><p class="sec-h">${h}</p><ul class="events next-list">${list.length ? list.join('') : `<li><time></time><span>${empty}</span></li>`}</ul></div>`;
-  return `<div class="alert-row"><p class="lede">Squawk looks ahead at every aircraft near ${esc(settings.place.name.split(',')[0])}. Times firm up as planes get closer; turns can change them.</p>
+  return `${skyReport()}<div class="alert-row"><p class="lede">Squawk looks ahead at every aircraft near ${esc(settings.place.name.split(',')[0])}. Times firm up as planes get closer; turns can change them.</p>
     <button class="btn alert-btn" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.5 2.5 0 0 0 2.4-2h-4.8a2.5 2.5 0 0 0 2.4 2zm7-6V11a7 7 0 0 0-5.5-6.8V3a1.5 1.5 0 0 0-3 0v1.2A7 7 0 0 0 5 11v5l-2 2v1h18v-1z"/></svg><span>Alert me</span></button></div>
   ${sec('Overhead soon', over, 'Nothing is heading right over you in the next 15 minutes.')}
   ${sec('Crossing the sun or moon', tr, S.pred.at ? 'No aircraft will cross the sun or moon near you in the next 10 minutes.' : 'Checking…')}
   ${sec('Rare and special', rare, 'No rare aircraft nearby right now. A380s, 747s, military flights and oddities show up here.')}
   ${sec('Satellites you can see', sats, !settings.sats ? 'Satellites are switched off in the layers menu.' : S.sats.ready ? 'No bright satellite passes in the next 24 hours. The ISS needs a dark sky with the station still in sunlight.' : 'Loading orbits…')}
   <div><p class="sec-h">Contrails</p><p class="lede">${ctr}</p></div>`;
+}
+// a short "your sky today" summary for newcomers: when to look, what's worth looking for
+function skyReport() {
+  const w = S.weather, now = new Date(), items = [], hour = localHour();
+  if (w) {
+    const s = spotScore(w); items.push(`<b>${s.lbl} spotting</b> right now (${s.score}/100). ${esc(s.why)}`);
+    if (w.sunset) { const [h, m] = w.sunset.slice(11, 16).split(':').map(Number), t = h * 60 + m - 60; if (hour < h) items.push(`<b>Golden hour</b> from ${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}, sunset ${w.sunset.slice(11, 16)}. Aircraft glow orange against the sky.`); }
+  }
+  const p = S.sats.passes.find(x => x.end > now);
+  if (p) items.push(`<b>${esc(p.sat.name)}</b> ${p.start <= now ? 'is passing over right now' : 'passes at ' + hhmm(p.start)}: a bright, steady light crossing in about ${Math.max(1, Math.round((p.end - p.start) / 60000))} minutes, up to ${Math.round(p.max)}°.`);
+  const mo = moonPosition(now, S.proj.lat0, S.proj.lon0);
+  if (mo.alt > 5) items.push(`<b>The moon</b> is ${Math.round(mo.lit * 100)}% lit and ${Math.round(mo.alt)}° up in the ${P16L[pt16(mo.az)]}. Keep an eye on the Next tab for planes crossing it.`);
+  const near = inRange().length; items.push(`<b>${near} aircraft</b> within ${IN_RANGE} km of you${S.pred.over.length ? `, ${S.pred.over.length} heading close overhead in the next 15 minutes` : ''}.`);
+  return `<div class="tonight"><h3>${hour >= 16 || hour < 4 ? 'Your sky tonight' : 'Your sky today'}</h3><ul>${items.map(i => `<li>${i}</li>`).join('')}</ul></div>`;
 }
 const isaKm = p => p > 226.32 ? (1 - Math.pow(p / 1013.25, 1 / 5.25588)) * 288.15 / 6.5 : 11 - Math.log(p / 226.32) * 6.34162;
 const fl = km => 'FL' + String(Math.round(km * 32.8084 / 10) * 10).padStart(3, '0');
@@ -744,15 +860,14 @@ function tickRecords() {
     if (!R.near || r.slant < R.near.v) R.near = { v: r.slant, cs: f.callsign };
     if (k > 600) award('fast'); if (f.alt > 13.7) award('high');
     if (r.d < 2 && f.alt < 3) award('over');
+    if (r.d < 5 && !f.overM) { f.overM = true; S.quiet = f.quiet; mission({ over: true }); S.quiet = false; }
   }
 }
 
 /* weather */
 const hm = s => s ? s.slice(11, 16) : '—';
 function windSVG(dir) { const a = (dir ?? 0) + 180; return `<svg viewBox="0 0 60 60"><circle cx="30" cy="30" r="26" class="dial"/><g transform="rotate(${a} 30 30)"><path class="arrow" d="M30 8l7 14h-5v24h-4V22h-5z"/></g></svg>`; }
-function weatherHTML() {
-  const w = S.weather;
-  if (!w) return '<p class="lede">Loading the weather for this spot. If it doesn\'t appear, the weather service may be unreachable from here.</p>';
+function spotScore(w) {
   const code = w.weather_code ?? 0, low = w.cloud_cover_low ?? 0, vis = w.visibility != null ? w.visibility / 1000 : null;
   let score = 100 - low * 0.55 - (w.cloud_cover_mid ?? 0) * 0.15;
   if (vis != null && vis < 10) score -= (10 - vis) * 5;
@@ -760,6 +875,12 @@ function weatherHTML() {
   if (world.day < 0.4) score -= 15;
   score = Math.round(clamp(score, 0, 100));
   const [lbl, col, why] = score >= 75 ? ['Excellent', '#16A34A', 'Clear views; you should see aircraft well above you.'] : score >= 55 ? ['Good', '#65A30D', 'Some cloud, but plenty of gaps to catch aircraft.'] : score >= 35 ? ['Fair', '#D97706', 'Low cloud will hide higher traffic. Low arrivals are still visible.'] : ['Poor', '#DC2626', 'Cloud, rain or haze will hide most aircraft. Try the 3D view instead.'];
+  return { score, lbl, col, why, vis, code };
+}
+function weatherHTML() {
+  const w = S.weather;
+  if (!w) return '<p class="lede">Loading the weather for this spot. If it doesn\'t appear, the weather service may be unreachable from here.</p>';
+  const { score, lbl, col, why, vis, code } = spotScore(w);
   const layer = (n, v) => `<div class="hbar"><span class="nm">${n}</span><span class="tr"><i style="width:${v ?? 0}%;background:var(--high)"></i></span><span class="c">${v ?? '–'}%</span></div>`;
   const dirTxt = d => d == null ? '' : 'from ' + P16[pt16(d)];
   const sunAlt = world.sun ? Math.round(world.sun.alt) : null;
@@ -778,13 +899,30 @@ function weatherHTML() {
 }
 
 /* log */
+const FLAME = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 2s1 3.2-1.4 6.3C10 11 8 12.2 8 15.5a4 4 0 0 0 8 0c0-1.6-.8-2.8-.8-2.8s2.8 1.2 2.8 4.3A6 6 0 0 1 6 17c0-5.3 5-7.2 5-11.3 0 0 2.5 1.2 2.5-3.7z"/></svg>';
 function logHTML() {
   const lg = theLog(), types = Object.entries(lg.types).sort((a, b) => b[1].first - a[1].first);
-  const got = BADGES.filter(b => lg.badges[b.id]).length;
+  const got = BADGES.filter(b => lg.badges[b.id]).length, L = levelOf(lg.xp || 0), st = streak(lg.days || []);
+  const day = lg.day && lg.day.date === today() ? lg.day : { done: {} };
+  const miss = missionsFor(today()).map(m => `<li class="${day.done[m.id] ? 'done' : ''}"><span class="chk"></span>${esc(m.text)}<small>+${XP.mission} XP</small></li>`).join('');
+  // collection: one card per family, locked until you've caught one
+  const byFam = new Map(); for (const [c, t] of types) { const f = familyOf(c); if (f) { const e = byFam.get(f.id) || { n: 0, seen: 0 }; e.n += t.n; e.seen += (lg.seenTypes || {})[c] || 0; byFam.set(f.id, e); } }
+  const cards = FAMILIES.map(f => { const e = byFam.get(f.id); return e ? `<div class="cc">${silhouette(f.m)}<span class="n">×${e.n}</span>${e.seen ? `<span class="eye">seen ${e.seen}</span>` : ''}<b>${esc(f.name)}</b><small>${esc(f.fact)}</small></div>`
+    : `<div class="cc locked">${silhouette(f.m)}<b>${esc(f.name)}</b><small>Not caught yet</small></div>`; }).join('');
   return `${S.mode !== 'live' ? '<p class="note">You\'re watching simulated traffic, so these catches last only for this visit. Catches from the live feed are saved in this browser.</p>' : ''}
-  <div class="tiles4"><div class="tile"><p class="k">Types</p><p class="v">${types.length}</p></div><div class="tile"><p class="k">Airlines</p><p class="v">${Object.keys(lg.airlines).length}</p></div><div class="tile"><p class="k">Tracked</p><p class="v">${lg.tracked}</p></div><div class="tile"><p class="k">Badges</p><p class="v">${got}/${BADGES.length}</p></div></div>
+  <div class="lvl-card"><div class="lvl-n">${L.n}</div><div><b>${esc(L.name)}</b><div class="xpbar"><i style="width:${Math.round(L.pct * 100)}%"></i></div><small>${L.xp.toLocaleString('en')} XP${L.to ? ` · ${(L.to - L.xp).toLocaleString('en')} to level ${L.n + 1}` : ' · top level'}</small></div><div class="streak">${FLAME}${st}<small>day streak</small></div></div>
+  <div><p class="sec-h">Today's missions</p><ul class="missions">${miss}</ul></div>
+  <div class="tiles4"><div class="tile"><p class="k">Types</p><p class="v">${types.length}</p></div><div class="tile"><p class="k">Airlines</p><p class="v">${Object.keys(lg.airlines).length}</p></div><div class="tile"><p class="k">Seen by eye</p><p class="v">${lg.seen || 0}</p></div><div class="tile"><p class="k">Badges</p><p class="v">${got}/${BADGES.length}</p></div></div>
+  <div><p class="sec-h">Collection · ${byFam.size} of ${FAMILIES.length} families</p><div class="coll">${cards}</div></div>
   <div><p class="sec-h">Badges</p><div class="badges">${BADGES.map(b => `<div class="bdg${lg.badges[b.id] ? ' got' : ''}"><span class="ic">${ICON_STAR}</span><b>${esc(b.name)}</b><span>${esc(b.desc)}</span></div>`).join('')}</div></div>
-  <div><p class="sec-h">Aircraft types caught</p><div class="types">${types.map(([c, t]) => `<div class="ty${D.HEAVY.has(c) ? ' heavy' : ''}"><span class="ct">×${t.n}</span><span class="code">${esc(c)}</span><span class="nm">${esc(D.TYPES[c] || c)}</span><span class="nm">${esc(t.al.slice(0, 2).join(' · '))}</span></div>`).join('') || '<p class="lede">Nothing caught yet.</p>'}</div></div>`;
+  <div><p class="sec-h">Aircraft types caught</p><div class="types">${types.map(([c, t]) => `<div class="ty${D.HEAVY.has(c) ? ' heavy' : ''}"><span class="ct">×${t.n}</span><span class="code">${esc(c)}</span><span class="nm">${esc(D.TYPES[c] || c)}</span><span class="nm">${esc(t.al.slice(0, 2).join(' · '))}</span></div>`).join('') || '<p class="lede">Nothing caught yet.</p>'}</div></div>
+  <div><p class="sec-h">How you earn XP</p><p class="lede">Aircraft that come within ${IN_RANGE} km count as caught: +${XP.catch} each, +${XP.type} for a new type, +${XP.airline} for a new airline. Seeing one with your own eyes and tapping "I saw it!" is worth +${XP.seen}, and +${XP.seenType} more for a type you've never seen. Badges give +${XP.badge} and daily missions +${XP.mission}.</p>
+  <button class="btn share-btn" id="shareBtn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 16a3 3 0 0 0-2.4 1.2l-6.7-3.4a3 3 0 0 0 0-1.6l6.7-3.4A3 3 0 1 0 15 7l-6.7 3.4a3 3 0 1 0 0 3.2L15 17a3 3 0 1 0 3-1z"/></svg>Share my progress</button></div>`;
+}
+async function shareLog() {
+  const lg = theLog(), L = levelOf(lg.xp || 0);
+  const text = `I'm a level ${L.n} ${L.name} on Squawk: ${Object.keys(lg.types).length} aircraft types, ${Object.keys(lg.airlines).length} airlines, ${lg.seen || 0} seen with my own eyes and a ${streak(lg.days || [])}-day streak.`;
+  try { if (navigator.share) await navigator.share({ title: 'My Squawk log', text, url: location.origin }); else { await navigator.clipboard.writeText(text + ' ' + location.origin); flash('Copied to your clipboard'); } } catch (e) { /* share cancelled */ }
 }
 function codesHTML() {
   return `<p class="lede">Every transponder broadcasts a four-digit code set by air traffic control. A few are reserved, and Squawk turns any aircraft using an emergency code red.</p>
@@ -872,7 +1010,7 @@ function tick(dt) {
   if (S.tab === 'next' && (acc.next += dt) > 1) { acc.next = 0; renderPanel(false); }
   if ((acc.hud += dt) > 0.5) { acc.hud = 0; updateHUD(); }
   if ((acc.card += dt) > 0.3) { acc.card = 0; if (S.selId) updateCard(); }
-  if ((acc.rec += dt) > 1) { acc.rec = 0; tickRecords(); followView(); }
+  if ((acc.rec += dt) > 1) { acc.rec = 0; tickRecords(); followView(); coachTick(); }
   if ((acc.hist += dt) > 20) { acc.hist = 0; if (S.mode !== 'boot') { S.history.push({ t: Date.now(), n: inRange().length }); if (S.history.length > 90) S.history.shift(); } }
   if (S.tab === 'board' && (acc.board += dt) > 3) { acc.board = 0; updateBoard(); }
   if ((S.tab === 'stats' || S.tab === 'log') && (acc.panel += dt) > 3) { acc.panel = 0; renderPanel(false); }
@@ -888,5 +1026,6 @@ function tick(dt) {
 window.__squawk = { world, S, ingest: list => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list); },
   step: (n = 1, dt = 1 / 30) => { for (let i = 0; i < n; i++) { world.clock.elapsedTime += dt; tick(dt); } } };
 $('timeR').value = 0;
+paintLevel();
 setPlace(settings.place, true);
 requestAnimationFrame(frame);

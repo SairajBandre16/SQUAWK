@@ -36,7 +36,7 @@
   <div class="brand">
     <span class="mark" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M32 8l5 19 18 8v6l-18-3-2 12 7 4v5l-10-2-10 2v-5l7-4-2-12-18 3v-6l18-8z"/></svg></span>
     <div>
-      <p class="wordmark">SQUAWK</p>
+      <p class="wordmark">SQUAWK <button class="lvl" id="lvlChip" type="button" aria-label="Your spotter level">Lv 1</button></p>
       <button class="place-btn" id="placeBtn" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg><span id="placeName">Dublin, Ireland</span><i aria-hidden="true">▾</i></button>
     </div>
   </div>
@@ -118,6 +118,8 @@
       </svg>
       <div><p class="k">Where to look</p><p class="look-text" id="cLook"></p><p class="sub" id="cDist"></p><p class="sub next" id="cNext" hidden></p></div>
     </div>
+    <p class="fact" id="cFact" hidden></p>
+    <button class="btn saw" id="cSaw" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm0-6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg><span>I saw it!</span></button>
     <dl class="stats">
       <div><dt>Altitude</dt><dd id="cAlt"></dd></div><div><dt>Ground speed</dt><dd id="cSpd"></dd></div>
       <div><dt>Track</dt><dd id="cTrk"></dd></div><div><dt>Vertical</dt><dd id="cVs"></dd></div>
@@ -135,6 +137,11 @@
 <div class="toast" id="toast" hidden><b id="toastHead">LOOK UP</b><span id="toastText"></span></div>
 <div class="badge-toast" id="badgeToast" hidden></div>
 <div class="hint" id="hint" hidden></div>
+<div class="coach" id="coach" hidden role="dialog" aria-label="Your first sighting">
+  <p class="coach-h">Your first sighting</p>
+  <p class="coach-t" id="coachText"></p>
+  <div class="coach-b"><button class="btn primary" id="coachSaw">I see it!</button><button class="btn" id="coachNext">Try another</button><button class="btn ghost" id="coachLater">Later</button></div>
+</div>
 <div class="ping" id="ping" hidden role="status"><b id="pingHead"></b><span id="pingText"></span></div>
 
 <div class="hud-bl">
