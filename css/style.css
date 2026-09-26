@@ -88,6 +88,8 @@ svg{fill:currentColor}
 .seg button{flex:1;border:0;background:none;padding:8px 10px;border-radius:9px;font-weight:600;font-size:13px;color:var(--ink-2);white-space:nowrap}
 .seg button[aria-pressed="true"]{background:var(--glass-strong);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.12)}
 .credit{margin:4px 0 0;font-size:11px;color:var(--ink-3)}
+.feed-note{margin:0;font-size:12.5px;line-height:1.45;color:var(--ink-2)}
+button.chip{color:var(--ink);cursor:pointer}
 
 /* ---------- labels ---------- */
 #labels{position:fixed;inset:0;z-index:5;pointer-events:none;overflow:hidden}

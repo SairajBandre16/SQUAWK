@@ -10,7 +10,9 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 };
-const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby' }, store.get('squawk.settings', {}));
+const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', relay: '' }, store.get('squawk.settings', {}));
+{ const q = new URLSearchParams(location.search).get('relay'); if (q) settings.relay = q; }
+D.feedConfig.relayUrl = settings.relay;
 const saveSettings = () => store.set('squawk.settings', settings);
 const S = { flights: new Map(), mode: 'boot', provider: '', selId: null, follow: false, tab: 'sky', view: 'orbit', weather: null, timeOff: 0,
   events: [], history: [], rec: {}, booting: false, proj: null, sim: null };
@@ -96,10 +98,8 @@ function pushEvent(k, text) {
 function addFlight(f) {
   f.id = f.id || f.hex; f.phase = Math.random() * 3; f.emg = D.isEmergency(f);
   S.flights.set(f.id, f); logCatch(f);
-  if (!S.booting) {
-    if (D.HEAVY.has(f.type)) pushEvent('heavy', `${f.callsign}, a ${D.typeName(f)}, is in range at ${fmtAlt(f.alt)}`);
-    if (f.emg) emergency(f);
-  }
+  if (!S.booting && D.HEAVY.has(f.type)) pushEvent('heavy', `${f.callsign}, a ${D.typeName(f)}, is in range at ${fmtAlt(f.alt)}`);
+  if (f.emg) emergency(f);
 }
 function emergency(f) { pushEvent('emg', `${f.callsign} is squawking ${f.squawk}`); if (f.squawk === '7700') award('mayday'); }
 function removeFlight(id) { S.flights.delete(id); if (S.selId === id) select(null); }
@@ -134,12 +134,17 @@ function simStep(dt) {
   const r = S.sim.step(S.flights, dt);
   for (const f of r.landed) if (!S.booting) pushEvent('land', `${f.callsign} touched down at ${S.sim.ap.name}`);
   for (const id of r.gone) removeFlight(id);
-  for (const f of r.spawned) { addFlight(f); if (f.emg && !S.booting) emergency(f); }
+  for (const f of r.spawned) addFlight(f);
 }
 
 /* ---------------- feed ---------------- */
-let feedGen = 0, pollT = null, fails = 0, routeT = 0;
-function setFeed(mode, label) { $('feedChip').dataset.mode = mode; $('feedLabel').textContent = label; }
+let feedGen = 0, pollT = null, fails = 0;
+function setFeed(mode, label) {
+  $('feedChip').dataset.mode = mode; $('feedLabel').textContent = label;
+  $('feedNote').textContent = mode === 'live' ? `Receiving live positions from ${S.provider}, refreshed every 5 seconds.`
+    : mode === 'sim' ? 'The flight-tracking networks block direct requests from this site, so you are watching realistic simulated traffic. Host Squawk on Vercel or Netlify (the included config relays the feed), or paste a relay URL below. The README has the two-minute setup.'
+    : 'Connecting to the flight-tracking networks.';
+}
 function startSim() {
   clearFlights(); S.mode = 'sim'; S.booting = true;
   for (const f of S.sim.initial()) addFlight(f);
@@ -154,7 +159,6 @@ async function poll(gen, first) {
     if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; S.booting = true; ingest(list); S.booting = false; }
     else ingest(list);
     S.provider = provider; fails = 0; setFeed('live', 'Live · ' + provider);
-    if (performance.now() - routeT > 20000) { routeT = performance.now(); D.fetchRoutes([...S.flights.values()]); }
     pollT = setTimeout(() => poll(gen), POLL_MS);
   } catch (e) {
     if (gen !== feedGen) return;
@@ -262,6 +266,7 @@ function select(id) {
   if (!S.selId) { setFollow(false); return; }
   if (innerWidth < 760 && S.tab !== 'sky') setTab('sky');
   const f = S.flights.get(S.selId);
+  if (f.kind === 'live') D.wantRoutes([f.callsign]);
   const ph = $('cPhoto'); ph.querySelector('img')?.remove(); $('cPhotoEmpty').hidden = false; $('cCredit').textContent = '';
   $('cPhotoEmpty').textContent = f.kind === 'live' ? 'Looking for a photo' : 'Simulated aircraft';
   $('cFr24').hidden = $('cAdsb').hidden = f.kind !== 'live';
@@ -286,11 +291,11 @@ function phase(f) {
   if (f.alt > 8 && Math.abs(v) < 400) return 'Cruising';
   return v > 300 ? 'Climbing' : v < -300 ? 'Descending' : 'Level flight';
 }
-const routeOf = f => f.route !== undefined && f.kind !== 'live' ? f.route : D.getRoute(f.callsign);
+const routeOf = f => f.kind !== 'live' ? f.route : D.getRoute(f.callsign);
 function updateCard() {
   const f = S.flights.get(S.selId); if (!f) return;
   const r = relative(f);
-  $('cAirline').textContent = D.airlineName(f.callsign) || (f.kind === 'live' ? 'Operator unknown' : '');
+  $('cAirline').textContent = D.airlineName(f.callsign) || D.getRoute(f.callsign)?.airline || (f.kind === 'live' ? 'Operator unknown' : '');
   $('cCall').textContent = f.callsign; $('cType').textContent = D.typeName(f);
   $('cHeavy').hidden = !D.HEAVY.has(f.type);
   const sq = $('cSq'); sq.textContent = 'Squawk ' + (f.squawk || '----'); sq.className = 'pill' + (f.emg ? ' emg' : '');
@@ -341,8 +346,11 @@ function togglePop(id, btn, show) {
 }
 $('placeBtn').onclick = e => { e.stopPropagation(); togglePop('placePop', 'placeBtn'); if (!$('placePop').hidden) $('searchQ').focus(); };
 $('layersBtn').onclick = e => { e.stopPropagation(); togglePop('layersPop', 'layersBtn'); };
+$('feedChip').onclick = e => { e.stopPropagation(); togglePop('layersPop', 'layersBtn', true); };
+$('relayQ').value = settings.relay;
+$('relayForm').onsubmit = e => { e.preventDefault(); settings.relay = $('relayQ').value.trim(); saveSettings(); D.feedConfig.relayUrl = settings.relay; D.resetFeedSources(); restartFeed(); };
 document.addEventListener('pointerdown', e => {
-  for (const [o, b] of [['placePop', 'placeBtn'], ['layersPop', 'layersBtn']]) if (!$(o).hidden && !$(o).contains(e.target) && !$(b).contains(e.target)) togglePop(o, b, false);
+  for (const [o, b] of [['placePop', 'placeBtn'], ['layersPop', 'layersBtn']]) if (!$(o).hidden && !$(o).contains(e.target) && !$(b).contains(e.target) && !$('feedChip').contains(e.target)) togglePop(o, b, false);
 });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
@@ -440,6 +448,7 @@ function setCell(fl, str, i) { const s = (str || '').toUpperCase().slice(0, fl.l
 function updateBoard() {
   if (!$('flapBoard')) return;
   const list = [...S.flights.values()].map(f => ({ f, r: relative(f) })).sort((a, b) => a.r.d - b.r.d).slice(0, ROWS);
+  if (S.mode === 'live') D.wantRoutes(list.map(x => x.f.callsign));
   rowEls.forEach((re, i) => {
     const it = list[i];
     if (!it) { re.row.dataset.id = ''; COLS.forEach(c => setCell(re.cells[c.k], '', i)); return; }
@@ -596,6 +605,7 @@ function frame() {
   }
 }
 
-window.__squawk = { world, S };
+window.__squawk = { world, S, ingest: list => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list); } };
+$('timeR').value = 0;
 setPlace(settings.place);
 requestAnimationFrame(frame);

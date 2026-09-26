@@ -93,53 +93,66 @@ async function getJSON(url, opts = {}, ms = 8000) {
   } finally { clearTimeout(tm); }
 }
 
-// Community ADS-B networks that serve the readsb "v2" JSON format with CORS enabled.
-export const PROVIDERS = [
-  { name: 'ADSB.lol', url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}` },
-  { name: 'airplanes.live', url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}` },
-  { name: 'adsb.fi', url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}` }
+// Community ADS-B networks serving the readsb "v2" JSON format. Browsers block direct requests to them
+// (no CORS headers), so Squawk first tries a same-origin relay (vercel.json / _redirects rewrite these paths),
+// then an optional relay URL (e.g. the Cloudflare Worker in /worker), then the networks directly.
+const DIRECT = [
+  { name: 'ADSB.lol', relay: 'api/adsb', url: (la, lo, nm) => `https://api.adsb.lol/v2/lat/${la}/lon/${lo}/dist/${nm}`, path: (la, lo, nm) => `lat/${la}/lon/${lo}/dist/${nm}` },
+  { name: 'airplanes.live', relay: 'api/apl', url: (la, lo, nm) => `https://api.airplanes.live/v2/point/${la}/${lo}/${nm}`, path: (la, lo, nm) => `point/${la}/${lo}/${nm}` },
+  { name: 'adsb.fi', relay: 'api/adsbfi', url: (la, lo, nm) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}`, path: (la, lo, nm) => `lat/${la}/lon/${lo}/dist/${nm}` }
 ];
-let provIdx = 0;
+export const feedConfig = { relayUrl: '' };
+const dead = new Set();
+function sources() {
+  const out = [];
+  if (location.protocol.startsWith('http')) for (const p of DIRECT) out.push({ key: 'same:' + p.name, name: p.name, make: (a, b, c) => `${p.relay}/${p.path(a, b, c)}` });
+  const r = (feedConfig.relayUrl || '').trim();
+  if (r) for (const p of DIRECT) out.push({ key: 'relay:' + p.name, name: p.name + ' via relay', make: (a, b, c) => `${r}${r.includes('?') ? '&' : '?'}url=${encodeURIComponent(p.url(a, b, c))}` });
+  for (const p of DIRECT) out.push({ key: 'direct:' + p.name, name: p.name, make: p.url });
+  return out.filter(s => !dead.has(s.key));
+}
+let lastGood = null;
+export const resetFeedSources = () => { dead.clear(); lastGood = null; };
 export async function fetchAircraft(lat, lon, nm) {
+  let list = sources(); if (lastGood) list = [...list.filter(s => s.key === lastGood), ...list.filter(s => s.key !== lastGood)];
   let lastErr;
-  for (let k = 0; k < PROVIDERS.length; k++) {
-    const p = PROVIDERS[(provIdx + k) % PROVIDERS.length];
+  for (const s of list) {
     try {
-      const j = await getJSON(p.url(lat.toFixed(4), lon.toFixed(4), nm), {}, 7000);
-      const list = j.ac || j.aircraft;
-      if (!Array.isArray(list)) throw new Error('bad payload');
-      provIdx = (provIdx + k) % PROVIDERS.length;
-      return { list, provider: p.name };
-    } catch (e) { lastErr = e; }
+      const r = await fetch(s.make(lat.toFixed(4), lon.toFixed(4), nm), { cache: 'no-store', signal: AbortSignal.timeout ? AbortSignal.timeout(7000) : undefined });
+      const ct = r.headers.get('content-type') || '';
+      if (!r.ok || !ct.includes('json')) { if (r.status === 404 || r.status === 405 || !ct.includes('json')) dead.add(s.key); throw new Error('HTTP ' + r.status); }
+      const j = await r.json(); const ac = j.ac || j.aircraft;
+      if (!Array.isArray(ac)) throw new Error('bad payload');
+      lastGood = s.key; return { list: ac, provider: s.name };
+    } catch (e) { lastErr = e; if (e instanceof TypeError && s.key.startsWith('direct:')) dead.add(s.key); }
   }
   throw lastErr || new Error('no provider');
 }
 
-// Plausible routes from ADSB.lol's route database, batched.
-const routeCache = new Map(); let routeFails = 0;
+// Routes from adsbdb.com (CORS-enabled), one callsign at a time, cached and throttled.
+const routeCache = new Map(), routeQueue = []; let routeBusy = false;
 export const getRoute = cs => routeCache.get(cs);
-export async function fetchRoutes(flights) {
-  if (routeFails > 3) return;
-  const want = flights.filter(f => f.callsign && /\d/.test(f.callsign) && !routeCache.has(f.callsign)).slice(0, 80);
-  if (!want.length) return;
-  try {
-    const body = JSON.stringify({ planes: want.map(f => ({ callsign: f.callsign, lat: f.lat, lng: f.lon })) });
-    const res = await getJSON('https://api.adsb.lol/api/0/routeset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }, 9000);
-    const got = new Set();
-    for (const r of Array.isArray(res) ? res : []) {
-      const aps = r._airports || [];
-      if (r.callsign && aps.length >= 2 && r.plausible !== false) {
-        const a = aps[0], b = aps[aps.length - 1];
-        routeCache.set(r.callsign, {
-          from: { iata: a.iata || a.icao, name: a.location || a.name, lat: +a.lat, lon: +a.lon },
-          to: { iata: b.iata || b.icao, name: b.location || b.name, lat: +b.lat, lon: +b.lon }
-        });
-        got.add(r.callsign);
+export function wantRoutes(callsigns) {
+  for (const cs of callsigns) if (cs && /\d/.test(cs) && !routeCache.has(cs) && !routeQueue.includes(cs)) routeQueue.push(cs);
+  if (routeQueue.length > 40) routeQueue.splice(0, routeQueue.length - 40);
+  pumpRoutes();
+}
+async function pumpRoutes() {
+  if (routeBusy) return; routeBusy = true;
+  while (routeQueue.length) {
+    const cs = routeQueue.shift(); if (routeCache.has(cs)) continue;
+    routeCache.set(cs, null);
+    try {
+      const j = await getJSON(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(cs)}`, {}, 7000);
+      const fr = j.response && j.response.flightroute;
+      if (fr && fr.origin && fr.destination) {
+        const ap = a => ({ iata: a.iata_code || a.icao_code, name: a.municipality || a.name, lat: a.latitude, lon: a.longitude });
+        routeCache.set(cs, { from: ap(fr.origin), to: ap(fr.destination), airline: fr.airline && fr.airline.name });
       }
-    }
-    for (const f of want) if (!got.has(f.callsign)) routeCache.set(f.callsign, null);
-    routeFails = 0;
-  } catch (e) { routeFails++; }
+    } catch (e) { /* unknown callsign or service unavailable */ }
+    await new Promise(r => setTimeout(r, 350));
+  }
+  routeBusy = false;
 }
 
 const photoCache = new Map();

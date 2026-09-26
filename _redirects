@@ -1,0 +1,4 @@
+# Netlify: relay the ADS-B networks through this site so browsers can read them.
+/api/adsb/*    https://api.adsb.lol/v2/:splat          200
+/api/apl/*     https://api.airplanes.live/v2/:splat    200
+/api/adsbfi/*  https://opendata.adsb.fi/api/v2/:splat  200
