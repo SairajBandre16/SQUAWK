@@ -2,7 +2,9 @@ import * as THREE from 'three';
 import { World, RINGS, altColor, TILE_STYLES, HOME_R, SPACE_R } from './world.js';
 import * as D from './data.js';
 import { Sim } from './sim.js';
-import { Proj, relative, P16, P16L, pt16, clamp, haversine, curvDrop, step } from './geo.js';
+import { Proj, relative, P16, P16L, pt16, clamp, haversine, curvDrop, step, sunPosition, moonPosition } from './geo.js';
+import { closestApproach, transits, contrailAt, pressureAt } from './predict.js';
+import { Sats } from './sats.js';
 
 const $ = id => document.getElementById(id);
 const IN_RANGE = 185, FEED_NM = 100, POLL_MS = 5000;
@@ -10,12 +12,13 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 };
-const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', names: true, relay: '' }, store.get('squawk.settings', {}));
+const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', names: true, sats: true, alerts: false, relay: '' }, store.get('squawk.settings', {}));
 { const q = new URLSearchParams(location.search).get('relay'); if (q) settings.relay = q; }
 D.feedConfig.relayUrl = settings.relay;
 const saveSettings = () => store.set('squawk.settings', settings);
 const S = { flights: new Map(), mode: 'boot', provider: '', selId: null, follow: false, tab: 'sky', view: 'orbit', weather: null, timeOff: 0,
-  events: [], history: [], rec: {}, booting: false, quiet: false, feedResolved: false, region: null, proj: null, sim: null };
+  events: [], history: [], rec: {}, booting: false, quiet: false, feedResolved: false, region: null, proj: null, sim: null,
+  pred: { over: [], tr: [], rare: [] }, sats: new Sats(), alerted: new Set() };
 const hexOf = c => '#' + c.getHexString();
 const tmpC = new THREE.Color();
 const fmtAlt = km => { const ft = km * 3280.84; return ft >= 5000 ? 'FL' + String(Math.round(ft / 100)).padStart(3, '0') : (Math.round(ft / 100) * 100).toLocaleString('en') + ' ft'; };
@@ -23,6 +26,8 @@ const boardAlt = km => { const ft = km * 3280.84; return ft >= 5000 ? 'FL' + Str
 const kt = f => Math.round(f.spd * 1943.84);
 const fpm = f => Math.round(f.vr * 196850 / 50) * 50;
 const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
+const mmss = t => t >= 3600 ? Math.floor(t / 3600) + 'h ' + String(Math.floor(t % 3600 / 60)).padStart(2, '0') + 'm' : Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
+const hhmm = d => { const off = S.weather?.utcOffset; const x = off != null ? new Date(d.getTime() + off * 1000) : d; return off != null ? String(x.getUTCHours()).padStart(2, '0') + ':' + String(x.getUTCMinutes()).padStart(2, '0') : x.toTimeString().slice(0, 5); };
 const rel = f => relative(f, S.proj);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -73,7 +78,11 @@ function award(id) {
 function localHour() { const off = S.weather?.utcOffset; const d = new Date(Date.now() + S.timeOff * 3600e3); return off != null ? new Date(d.getTime() + off * 1000).getUTCHours() : d.getHours(); }
 function logCatch(f) {
   const lg = theLog(); lg.tracked++;
-  if (f.type) { const t = lg.types[f.type] || (lg.types[f.type] = { n: 0, first: Date.now(), al: [] }); t.n++; const an = D.airlineName(f.callsign); if (an && !t.al.includes(an) && t.al.length < 5) t.al.push(an); }
+  if (f.type) {
+    const fresh = !lg.types[f.type], t = lg.types[f.type] || (lg.types[f.type] = { n: 0, first: Date.now(), al: [] }); t.n++;
+    const an = D.airlineName(f.callsign); if (an && !t.al.includes(an) && t.al.length < 5) t.al.push(an);
+    if (fresh && !S.booting && !S.quiet && Object.keys(lg.types).length > 1) pushEvent('badge', `New type for your log: ${D.typeName(f)} (${f.callsign})`);
+  }
   const ac = D.airlineCode(f.callsign); if (ac) lg.airlines[ac] = (lg.airlines[ac] || 0) + 1;
   award('first');
   if (D.HEAVY.has(f.type)) award('heavy');
@@ -93,6 +102,87 @@ const EV_COL = { land: 'var(--low)', heavy: 'var(--mid)', over: '#22C55E', emg: 
 function pushEvent(k, text) {
   S.events.unshift({ k, text, t: new Date() }); if (S.events.length > 30) S.events.length = 30;
   if (S.tab === 'board') renderEvents();
+}
+
+/* ---------------- coming up: overhead passes, transits, rare aircraft, satellites ---------------- */
+// Recomputed every 2 s from the live positions. Times are seconds from S.pred.at.
+function predictAll() {
+  const o = S.proj, now = Date.now(), near = [];
+  for (const f of S.flights.values()) if (Math.abs(f.lat - o.lat0) < 4 && Math.abs(f.lon - o.lon0) < 6 && haversine(o.lat0, o.lon0, f.lat, f.lon) < 450) near.push(f);
+  const over = [];
+  for (const f of near) {
+    f.ctr = f.alt > 5 ? contrailAt(f.alt, S.weather?.levels)?.state : null;
+    const c = closestApproach(f, o, 900);
+    f.next = c && c.t > 1 && c.d < 60 ? c : null;
+    if (c && c.t > 1 && c.d < 8 && c.alt > 0.15) over.push({ f, ...c });
+  }
+  over.sort((a, b) => a.t - b.t);
+  const lat = o.lat0, lon = o.lon0, when = t => new Date(now + t * 1000);
+  const tr = [...transits(near, o, t => sunPosition(when(t), lat, lon)).map(x => ({ ...x, body: 'sun' })),
+    ...transits(near, o, t => moonPosition(when(t), lat, lon)).map(x => ({ ...x, body: 'moon' }))]
+    .filter(x => x.hit || (x.move && x.move.d < 25)).sort((a, b) => a.t - b.t);
+  const rare = [];
+  for (const f of near) { const what = D.rareOf(f); if (!what) continue; const r = rel(f); if (r.d < IN_RANGE || (f.next && f.next.d < IN_RANGE)) rare.push({ f, what, r }); }
+  S.pred = { at: now, over, tr, rare };
+  world.setTransitLines(tr.filter(x => x.move && x.move.d < 40).slice(0, 3));
+  for (const x of over) if (x.t < 75) ping('over:' + x.f.id, 'LOOK UP', `${x.f.callsign} passes ${x.d < 1 ? 'right over you' : x.d.toFixed(1) + ' km ' + P16[pt16(x.brg)]} in ${Math.round(x.t)} s, ${Math.round(x.elev)}° up.`, x.f.id);
+  for (const x of tr) if (x.t < 120 && (x.hit || x.move.d < 3)) ping('tr:' + x.body + x.f.id, x.body === 'sun' ? 'SUN TRANSIT' : 'MOON TRANSIT', transitText(x), x.f.id);
+  for (const x of rare) ping('rare:' + x.f.id, 'RARE', `${x.what}: ${x.f.callsign} is ${Math.round(x.r.d)} km ${P16[pt16(x.r.brg)]} of you.`, x.f.id);
+  const p = S.sats.passes.find(p => p.start > now && p.start - now < 180e3);
+  if (p) ping('sat:' + p.sat.id + +p.start, p.sat.name.toUpperCase(), `${p.sat.name} rises in the ${P16L[pt16(p.startAz)]} in ${mmss((p.start - now) / 1000)}, climbing to ${Math.round(p.max)}°.`);
+}
+function transitText(x) {
+  const body = x.body === 'sun' ? 'the sun' : 'the moon', when = x.t < 90 ? `in ${Math.round(x.t)} s` : `in ${mmss(x.t)}`;
+  if (x.hit) return `${x.f.callsign} crosses ${body} ${when}, seen from right where you are. Look ${P16L[pt16(x.brg)]}, ${Math.round(x.elev)}° up. It lasts about ${x.dur < 1 ? 'a split second' : x.dur.toFixed(1) + ' s'}.`;
+  return `${x.f.callsign} passes ${x.sep.toFixed(1)}° from ${body} ${when}. Move ${x.move.d < 1 ? Math.round(x.move.d * 1000) + ' m' : x.move.d.toFixed(1) + ' km'} ${P16L[pt16(x.move.brg)]} to see it cross dead centre.`;
+}
+
+// alerts: a toast while you're looking, plus a chime, a buzz and a system notification when you've switched them on
+let audio = null;
+function chime() {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const t = audio.currentTime;
+    for (const [f, d] of [[880, 0], [1320, 0.12]]) { const o = audio.createOscillator(), g = audio.createGain(); o.frequency.value = f; g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.18, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.5); o.connect(g).connect(audio.destination); o.start(t + d); o.stop(t + d + 0.55); }
+  } catch (e) { /* no audio */ }
+}
+function ping(key, head, text, id) {
+  if (S.alerted.has(key) || S.mode === 'boot') return;
+  S.alerted.add(key);
+  const el = $('ping'); $('pingHead').textContent = head; $('pingText').textContent = text; el.hidden = false; el.dataset.id = id || '';
+  clearTimeout(ping.t); ping.t = setTimeout(() => { el.hidden = true; }, 9000);
+  pushEvent('info', `${head === 'LOOK UP' ? 'Overhead' : cap(head.toLowerCase())}: ${text}`);
+  if (!settings.alerts) return;
+  chime(); navigator.vibrate?.([80, 60, 80]);
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') { try { new Notification('Squawk · ' + head, { body: text, tag: key }); } catch (e) { /* not allowed here */ } }
+}
+$('ping').onclick = () => { const id = $('ping').dataset.id; if (id && S.flights.has(id)) { select(id); } $('ping').hidden = true; };
+async function toggleAlerts() {
+  settings.alerts = !settings.alerts; saveSettings();
+  if (settings.alerts) { chime(); if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) { /* ignored */ } } }
+  paintAlerts();
+}
+function paintAlerts() { for (const b of document.querySelectorAll('.alert-btn')) { b.setAttribute('aria-pressed', String(settings.alerts)); b.lastChild.textContent = settings.alerts ? 'Alerts on' : 'Alert me'; } }
+
+// satellites: positions once a second, visible passes every 30 minutes and whenever home moves
+let satT = 0, satPredT = 0;
+async function startSats() {
+  if (!settings.sats || S.sats.ready || S.sats.loading) return;
+  S.sats.loading = true; try { await S.sats.load(); } catch (e) { /* CelesTrak unreachable */ } S.sats.loading = false;
+  tickSats(true);
+}
+function tickSats(force) {
+  if (!S.sats.ready || !settings.sats) return;
+  const now = Date.now();
+  if (force || now - satT > 1000) {
+    satT = now; S.sats.update(new Date(now));
+    for (const s of S.sats.list) if (s.pos) s.lit = Sats.sunlit(s.pos, new Date(now));
+  }
+  if (force || now - satPredT > 30 * 60e3) {
+    satPredT = now; S.sats.predict(S.proj.lat0, S.proj.lon0, 24).then(() => { if (S.tab === 'next') renderPanel(false); });
+    const iss = S.sats.list.find(s => s.id === 25544);
+    if (iss) world.setOrbit(S.sats.track(iss, now));
+  }
 }
 
 /* ---------------- flights ---------------- */
@@ -121,7 +211,7 @@ function ingest(list) {
     const id = 'h' + a.hex, cs = (a.flight || '').trim();
     const d = { hex: a.hex, lat: a.lat, lon: a.lon, alt: Math.max(0, ft * 0.0003048), spd: (a.gs || 0) * 0.000514444,
       vr: (a.baro_rate ?? a.geom_rate ?? 0) * 0.00000508, squawk: a.squawk || '', type: a.t || '', desc: a.desc || '', reg: a.r || '',
-      cat: a.category || '', callsign: cs || a.r || String(a.hex).toUpperCase(), lastFix: now, kind: 'live' };
+      cat: a.category || '', callsign: cs || a.r || String(a.hex).toUpperCase(), lastFix: now, kind: 'live', mil: !!(a.dbFlags & 1), odd: !!(a.dbFlags & 2) };
     const trk = a.track ?? a.true_heading ?? a.mag_heading;
     const f = S.flights.get(id);
     if (!f) addFlight({ id, trk: trk ?? 0, turn: 0, ...d });
@@ -203,8 +293,8 @@ function setPlace(p, boot) {
   world.setHome(p.lat, p.lon); world.setAirports(D.AIRPORTS, S.proj);
   if (boot) world.flyTo(p.lat, p.lon, SPACE_R, { instant: true, theta: 0, phi: 0 });
   else { if (S.view === 'ground') setView('orbit'); world.flyTo(p.lat, p.lon, HOME_R, S.view === 'top' ? { theta: 0, phi: 0.02 } : { theta: 0.6, phi: 1.02 }); }
-  clearFlights(); S.follow = false;
-  S.sim = new Sim(S.proj); S.history = []; S.rec = {};
+  clearFlights(); S.follow = false; S.pred = { over: [], tr: [], rare: [] }; world.setTransitLines([]);
+  S.sim = new Sim(S.proj); S.history = []; S.rec = {}; satPredT = 0;
   buildPlaceLabels(); S.weather = null; loadWeather(); updateSun();
   restartFeed();
   if (S.tab !== 'sky') renderPanel(true);
@@ -262,11 +352,11 @@ function updateLabels(arr) {
     if (!isSel && rects.some(r => x < r[2] && x + w > r[0] && y < r[3] && y + h > r[1])) continue;
     rects.push([x, y, x + w, y + h]);
     const el = getLabel(n++); el._id = f.id;
-    const key = f.callsign + fmtAlt(f.alt) + f.emg + isSel + (f.vr > 0.001 ? 1 : f.vr < -0.001 ? 2 : 0);
+    const rare = !!D.rareOf(f), key = f.callsign + fmtAlt(f.alt) + f.emg + isSel + rare + (f.vr > 0.001 ? 1 : f.vr < -0.001 ? 2 : 0);
     if (el._key !== key) {
-      el._key = key; el.firstChild.textContent = f.callsign;
+      el._key = key; el.firstChild.textContent = f.callsign + (rare ? ' ★' : '');
       el.lastChild.textContent = f.emg ? 'SQUAWK ' + f.squawk : `${fmtAlt(f.alt)} ${f.vr > 0.001 ? '↑' : f.vr < -0.001 ? '↓' : ''}  ${f.type || ''}`;
-      el.classList.toggle('sel', isSel); el.classList.toggle('emg', f.emg);
+      el.classList.toggle('sel', isSel); el.classList.toggle('emg', f.emg); el.classList.toggle('rare', rare && !f.emg);
       el.style.setProperty('--c', hexOf(v.col));
     }
     el.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`; el.hidden = false;
@@ -278,7 +368,18 @@ function updateLabels(arr) {
     const show = P.vis && !(p.cls === 'ring' && S.view === 'ground') && !(far && p.cls !== 'you');
     p.el.hidden = !show; if (show) p.el.style.transform = `translate(${P.x.toFixed(1)}px,${P.y.toFixed(1)}px) translate(-50%,-50%)`;
   }
+  let k = 0;
+  if (settings.sats) for (const s of S.sats.list) {
+    if (!s.star || !s.scene) continue;
+    world.project(s.scene, P); if (!P.vis) continue;
+    const el = satLbls[k] || (satLbls[k] = Object.assign(document.createElement('div'), { className: 'place-lbl sat' }));
+    if (!el.isConnected) { labelsEl.appendChild(el); el.onclick = () => { if (el._s?.pos) { const ll = toLL(el._s.pos); setFollow(false); if (S.view === 'ground') setView('orbit'); world.flyTo(ll.lat, ll.lon, 4000, { phi: 0 }); } }; }
+    el._s = s; el.textContent = `${s.name} · ${Math.round(s.alt)} km${s.lit === false ? ' · in shadow' : ''}`;
+    el.style.transform = `translate(${(P.x + 10).toFixed(1)}px,${(P.y - 10).toFixed(1)}px)`; el.hidden = false; k++;
+  }
+  for (let i = k; i < satLbls.length; i++) satLbls[i].hidden = true;
 }
+const satLbls = [], toLL = p => { const r = Math.hypot(p.x, p.y, p.z); return { lat: Math.asin(p.y / r) * 180 / Math.PI, lon: Math.atan2(p.x, p.z) * 180 / Math.PI }; };
 
 /* ---------------- selection & card ---------------- */
 world.onPick = (cx, cy) => {
@@ -328,6 +429,9 @@ function updateCard() {
   $('cCall').textContent = f.callsign; $('cType').textContent = D.typeName(f);
   $('cHeavy').hidden = !D.HEAVY.has(f.type);
   const sq = $('cSq'); sq.textContent = 'Squawk ' + (f.squawk || '----'); sq.className = 'pill' + (f.emg ? ' emg' : '');
+  const rare = D.rareOf(f); $('cRare').hidden = !rare; $('cRare').textContent = rare || '';
+  const ct = f.ctr; $('cCtr').hidden = !ct; $('cCtr').textContent = ct === 'persistent' ? 'Lasting contrail' : ct === 'short' ? 'Short contrail' : 'No contrail';
+  $('cCtr').title = ct === 'persistent' ? 'Cold, ice-saturated air at this height: the trail should spread and linger.' : ct === 'short' ? 'Cold enough for a contrail, but dry air: it should fade within seconds.' : 'Too warm at this height for a contrail.';
   const rt = routeOf(f);
   $('cRoute').hidden = !rt;
   if (rt) {
@@ -341,6 +445,11 @@ function updateCard() {
   const home = settings.place.name.split(',')[0];
   $('cLook').textContent = r.d > 600 ? `Too far to see from ${home}` : r.elev < 0.5 ? `${cap(P16L[p])}, below your horizon` : `${cap(P16L[p])}, ${Math.round(r.elev)}° up`;
   $('cDist').textContent = `${r.d < 10 ? r.d.toFixed(1) : Math.round(r.d).toLocaleString('en')} km ${r.d > 600 ? 'from ' + home : 'away'} · bearing ${String(Math.round(r.brg)).padStart(3, '0')}°`;
+  // what's coming: its closest pass, and any sun or moon crossing
+  const age = S.pred.at ? (Date.now() - S.pred.at) / 1000 : 0, nx = f.next, tr = S.pred.tr.find(x => x.f === f);
+  const ahead = nx && nx.t - age > 2 && nx.d < r.d - 1 ? `Closest in ${mmss(nx.t - age)}: ${nx.d < 1 ? 'right overhead' : nx.d.toFixed(1) + ' km ' + P16[pt16(nx.brg)]}, ${Math.round(nx.elev)}° up` : '';
+  $('cNext').hidden = !(ahead || tr); $('cNext').textContent = tr ? transitText({ ...tr, t: Math.max(0, tr.t - age) }) : ahead;
+  $('cNext').classList.toggle('tr', !!tr);
   $('cAlt').textContent = `${fmtAlt(f.alt)} · ${Math.round(f.alt * 1000).toLocaleString('en')} m`;
   $('cSpd').textContent = `${kt(f)} kt · ${Math.round(f.spd * 3600)} km/h`;
   $('cTrk').textContent = String(Math.round(f.trk)).padStart(3, '0') + '° ' + P16[pt16(f.trk)];
@@ -432,12 +541,13 @@ bindSeg('styleSeg', () => settings.style, v => { settings.style = v; saveSetting
 bindSeg('namesSeg', () => settings.names ? 'on' : 'off', v => { settings.names = v === 'on'; saveSettings(); world.setNames(settings.names); });
 bindSeg('cloudSeg', () => settings.clouds ? 'on' : 'off', v => { settings.clouds = v === 'on'; saveSettings(); world.cloudsOn = settings.clouds; });
 bindSeg('labelSeg', () => settings.labels, v => { settings.labels = v; saveSettings(); });
+bindSeg('satSeg', () => settings.sats ? 'on' : 'off', v => { settings.sats = v === 'on'; saveSettings(); if (settings.sats) startSats(); });
 $('tileCredit').textContent = TILE_STYLES[settings.style].credit;
 world.setStyle(settings.style); world.setNames(settings.names);
 world.cloudsOn = settings.clouds;
 
 /* ---------------- tabs & panels ---------------- */
-const TAB_META = { board: ['Overhead board', 720], stats: ['Sky stats', 440], weather: ['Spotting weather', 420], log: ['Spotter\'s log', 460], codes: ['Squawk codes', 440] };
+const TAB_META = { next: ['Coming up', 460], board: ['Overhead board', 720], stats: ['Sky stats', 440], weather: ['Spotting weather', 420], log: ['Spotter\'s log', 460], codes: ['Squawk codes', 440] };
 function setTab(t) {
   S.tab = t;
   document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
@@ -453,6 +563,7 @@ $('panelClose').onclick = () => setTab('sky');
 function renderPanel(fresh) {
   const body = $('panelBody');
   if (S.tab === 'board') { if (fresh || !$('flapBoard')) buildBoard(body); updateBoard(); renderEvents(); }
+  else if (S.tab === 'next') { body.innerHTML = nextHTML(); for (const b of body.querySelectorAll('[data-id]')) b.onclick = () => { if (S.flights.has(b.dataset.id)) { select(b.dataset.id); setFollow(true); } }; for (const b of body.querySelectorAll('.alert-btn')) b.onclick = toggleAlerts; paintAlerts(); }
   else if (S.tab === 'stats') body.innerHTML = statsHTML();
   else if (S.tab === 'weather') { if (fresh || !renderPanel.wxDone) { body.innerHTML = weatherHTML(); renderPanel.wxDone = true; } }
   else if (S.tab === 'log') body.innerHTML = logHTML();
@@ -505,6 +616,31 @@ function renderEvents() {
   ul.innerHTML = S.events.length ? S.events.slice(0, 12).map(e => `<li><time>${e.t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</time><span><i class="dot" style="--c:${EV_COL[e.k]}"></i>${esc(e.text)}</span></li>`).join('')
     : '<li><time></time><span>Landings, heavies, emergencies and overhead passes will show up here.</span></li>';
 }
+
+/* coming up */
+function nextHTML() {
+  const age = S.pred.at ? (Date.now() - S.pred.at) / 1000 : 0, left = t => Math.max(0, t - age), now = Date.now();
+  const row = (id, time, title, text, cls = '') => `<li class="${cls}"${id ? ` data-id="${esc(id)}" role="button" tabindex="0"` : ''}><time>${time}</time><span><b>${esc(title)}</b>${esc(text)}</span></li>`;
+  const over = S.pred.over.filter(x => left(x.t) > 0).slice(0, 8).map(x => row(x.f.id, mmss(left(x.t)), x.f.callsign + (x.f.type ? ' · ' + x.f.type : ''),
+    `${x.d < 1 ? 'Right over you' : x.d.toFixed(1) + ' km ' + P16[pt16(x.brg)]}, ${Math.round(x.elev)}° up at ${fmtAlt(x.alt)}`));
+  const tr = S.pred.tr.filter(x => left(x.t) > 0).slice(0, 6).map(x => row(x.f.id, mmss(left(x.t)), `${x.f.callsign} ${x.hit ? 'crosses' : 'near'} the ${x.body}`, transitText({ ...x, t: left(x.t) }), x.hit ? 'hot' : ''));
+  const rare = S.pred.rare.slice(0, 8).map(x => row(x.f.id, x.r.d < IN_RANGE ? 'now' : x.f.next ? mmss(left(x.f.next.t)) : '', `${x.what} · ${x.f.callsign}`,
+    `${Math.round(x.r.d)} km ${P16[pt16(x.r.brg)]} of you${x.f.next ? `, closest ${Math.round(x.f.next.d)} km` : ''}`, 'rare'));
+  const sats = S.sats.passes.filter(p => p.end > now).slice(0, 6).map(p => row(null, hhmm(p.start), `${p.sat.name}${p.start < now ? ' · up now' : ''}`,
+    `${Math.round((p.end - p.start) / 60000) || 1} min, rising ${P16L[pt16(p.startAz)]}, up to ${Math.round(p.max)}°, setting ${P16L[pt16(p.endAz)]}`, 'sat'));
+  const lv = (S.weather?.levels || []).map(l => ({ l, c: contrailAt(isaKm(l.p), S.weather.levels) })).filter(x => x.c && x.c.state !== 'none');
+  const ctr = !S.weather?.levels ? 'Waiting for upper-air weather.' : lv.length ? `Contrails likely from ${fl(isaKm(lv[0].l.p))} upward${lv.some(x => x.c.state === 'persistent') ? ', and they should linger and spread' : ', but they should fade quickly'}. Planes making one show a white trail in the 3D view.` : 'The air up high is too warm or dry for contrails right now. Planes will leave clean skies.';
+  const sec = (h, list, empty) => `<div><p class="sec-h">${h}</p><ul class="events next-list">${list.length ? list.join('') : `<li><time></time><span>${empty}</span></li>`}</ul></div>`;
+  return `<div class="alert-row"><p class="lede">Squawk looks ahead at every aircraft near ${esc(settings.place.name.split(',')[0])}. Times firm up as planes get closer; turns can change them.</p>
+    <button class="btn alert-btn" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.5 2.5 0 0 0 2.4-2h-4.8a2.5 2.5 0 0 0 2.4 2zm7-6V11a7 7 0 0 0-5.5-6.8V3a1.5 1.5 0 0 0-3 0v1.2A7 7 0 0 0 5 11v5l-2 2v1h18v-1z"/></svg><span>Alert me</span></button></div>
+  ${sec('Overhead soon', over, 'Nothing is heading right over you in the next 15 minutes.')}
+  ${sec('Crossing the sun or moon', tr, S.pred.at ? 'No aircraft will cross the sun or moon near you in the next 10 minutes.' : 'Checking…')}
+  ${sec('Rare and special', rare, 'No rare aircraft nearby right now. A380s, 747s, military flights and oddities show up here.')}
+  ${sec('Satellites you can see', sats, !settings.sats ? 'Satellites are switched off in the layers menu.' : S.sats.ready ? 'No bright satellite passes in the next 24 hours. The ISS needs a dark sky with the station still in sunlight.' : 'Loading orbits…')}
+  <div><p class="sec-h">Contrails</p><p class="lede">${ctr}</p></div>`;
+}
+const isaKm = p => p > 226.32 ? (1 - Math.pow(p / 1013.25, 1 / 5.25588)) * 288.15 / 6.5 : 11 - Math.log(p / 226.32) * 6.34162;
+const fl = km => 'FL' + String(Math.round(km * 32.8084 / 10) * 10).padStart(3, '0');
 
 /* stats */
 function statsHTML() {
@@ -575,6 +711,8 @@ function weatherHTML() {
     <div class="wind">${windSVG(w.wind_direction_10m)}<p><b>${Math.round(w.wind_speed_10m ?? 0)} km/h</b>At ground level, ${dirTxt(w.wind_direction_10m)}</p></div>
     <div class="wind">${windSVG(w.jet?.dir)}<p><b>${w.jet?.speed != null ? Math.round(w.jet.speed) + ' km/h' : '—'}</b>Jet stream, about FL340, ${dirTxt(w.jet?.dir)}</p></div></div>
     <p class="lede" style="margin-top:8px">Aircraft land and take off into the wind, so the ground wind decides which way arrivals line up. A strong westerly jet stream is why eastbound flights across the Atlantic are faster.</p></div>
+  ${w.levels ? `<div><p class="sec-h">Contrails by height</p><div class="ctr-grid">${w.levels.slice().reverse().map(l => { const c = contrailAt(isaKm(l.p), w.levels); return c ? `<div class="ctr ${c.state}"><b>${fl(isaKm(l.p))}</b><span>${c.state === 'persistent' ? 'Lasting' : c.state === 'short' ? 'Short' : 'None'}</span><small>${Math.round(l.T)}°C · ${Math.round(c.rhi * 100)}% ice RH</small></div>` : ''; }).join('')}</div>
+    <p class="lede" style="margin-top:8px">A jet leaves a contrail when the air is cold enough for its exhaust to condense. If the air is also saturated with respect to ice, the trail lingers and spreads into cirrus.</p></div>` : ''}
   <div><p class="sec-h">Sun</p><div class="sunrow"><div class="tile"><p class="k">Sunrise</p><p class="v">${hm(w.sunrise)}</p></div><div class="tile"><p class="k">Golden hour</p><p class="v">${golden}</p></div><div class="tile"><p class="k">Sunset</p><p class="v">${hm(w.sunset)}</p></div></div>
   <p class="lede" style="margin-top:8px">The sun is ${sunAlt != null ? (sunAlt >= 0 ? sunAlt + '° above' : -sunAlt + '° below') : '—'} the horizon right now. The sky and lighting in the 3D view follow its real position, and the clouds follow the live cloud cover.</p></div>`;
 }
@@ -620,8 +758,17 @@ function updateExplore() {
   if (away) $('exploreT').textContent = `${d < 40 ? 'Zoomed out' : Math.round(d).toLocaleString('en') + ' km from home'} · ${S.flights.size.toLocaleString('en')} aircraft tracked`;
   paintView();
 }
+// the next plane to pass within a few km of you, counting down
+function updateNext() {
+  const age = S.pred.at ? (Date.now() - S.pred.at) / 1000 : 0, x = S.pred.over.find(o => o.t - age > 0);
+  $('rNextBox').dataset.id = x ? x.f.id : '';
+  $('rNext').textContent = x ? mmss(x.t - age) : '—';
+  $('rNextS').textContent = x ? `${x.f.callsign} · ${Math.round(x.elev)}° ${P16[pt16(x.brg)]}` : 'none in 15 min';
+  $('rNextBox').classList.toggle('soon', !!x && x.t - age < 60);
+}
+$('rNextBox').onclick = () => { const id = $('rNextBox').dataset.id; if (id && S.flights.has(id)) { select(id); setFollow(true); } };
 function updateHUD() {
-  updateExplore();
+  updateExplore(); updateNext();
   const near = inRange(), arr = near.map(o => o.f);
   $('rCount').textContent = arr.length;
   if (!arr.length) { $('rHigh').textContent = $('rNear').textContent = '—'; $('rHighS').innerHTML = $('rNearS').innerHTML = '&nbsp;'; $('toast').hidden = true; return; }
@@ -646,7 +793,7 @@ function showHint() {
 }
 
 /* ---------------- loop ---------------- */
-let acc = { hud: 0, card: 0, board: 2.5, panel: 0, rec: 0, hist: 15 };
+let acc = { hud: 0, card: 0, board: 2.5, panel: 0, rec: 0, hist: 15, pred: 1.5, next: 0 };
 const loader = $('loader'); let loaderDone = false; const bootT = performance.now();
 function frame() {
   requestAnimationFrame(frame);
@@ -658,8 +805,11 @@ function tick(dt) {
   const arr = [...S.flights.values()];
   world.syncAircraft(arr, dt, t, S.selId);
   const fp = S.follow && S.selId ? world.vis.get(S.selId)?.pos : null;
+  tickSats(); world.syncSats(S.sats.list, satT ? (Date.now() - satT) / 1000 : 0, settings.sats && S.sats.ready);
   world.frame(dt, t, fp || null);
   updateLabels(arr);
+  if ((acc.pred += dt) > 2) { acc.pred = 0; if (S.mode !== 'boot') predictAll(); }
+  if (S.tab === 'next' && (acc.next += dt) > 1) { acc.next = 0; renderPanel(false); }
   if ((acc.hud += dt) > 0.5) { acc.hud = 0; updateHUD(); }
   if ((acc.card += dt) > 0.3) { acc.card = 0; if (S.selId) updateCard(); }
   if ((acc.rec += dt) > 1) { acc.rec = 0; tickRecords(); followView(); }
@@ -670,7 +820,7 @@ function tick(dt) {
     const p = world.tileProgress(), k = p.total ? p.done / p.total : 0;
     $('loadArc').style.strokeDashoffset = String(1 - Math.max(0.03, Math.min(1, k * 0.8 + (S.feedResolved ? 0.2 : 0))));
     $('loadMsg').textContent = S.feedResolved ? 'Loading the ground' : 'Tuning to 1090 MHz';
-    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.intro(); showHint(); }
+    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.intro(); showHint(); setTimeout(startSats, 1500); }
   }
 }
 

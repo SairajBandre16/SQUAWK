@@ -6,6 +6,8 @@ import { Sky } from 'three/addons/objects/Sky.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -28,6 +30,7 @@ export function altColor(km, out) {
 }
 // nav lights in the model's frame: x, y, z offset, then r, g, b
 const NAV = [[-0.53, 0, 0.1, 1, 0.12, 0.15], [0.53, 0, 0.1, 0.1, 1, 0.35], [0, 0.02, 0.6, 1, 1, 1], [0, -0.07, 0, 1, 0.1, 0.1]];
+const CONTRAIL = new THREE.Color(0.93, 0.95, 1);
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 const ease = k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
 
@@ -100,7 +103,7 @@ export class World {
     this.vis = new Map(); this.cloudsOn = true; this.day = 1;
     this.homeGroup = new THREE.Group(); this.homeGroup.matrixAutoUpdate = false; this.scene.add(this.homeGroup);
     this.globe = new Globe(this.renderer, this.scene);
-    this.buildSky(); this.buildClouds(); this.buildAircraft(); this.buildObserver();
+    this.buildSky(); this.buildClouds(); this.buildAircraft(); this.buildObserver(); this.buildSats();
     this.airportGroup = new THREE.Group(); this.homeGroup.add(this.airportGroup);
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
@@ -313,7 +316,7 @@ export class World {
       if (list.length > TRAIL_F) list = list.sort((a, b) => a[2] - b[2]).slice(0, TRAIL_F);
       for (const [f, v] of list) {
         if (!v.filled) this.backfill(f, v);
-        const tr = v.trail, m = tr.length;
+        const tr = v.trail, m = tr.length, wk = f.ctr === 'persistent' ? 0 : f.ctr === 'short' ? m - 10 : m + 1;
         let px = null, py, pz;
         for (let k = 0; k <= m && n < TRAIL_F * TRAIL_N; k++) {
           let x, y, z;
@@ -321,7 +324,8 @@ export class World {
           if (px !== null) {
             const j = n * 6, fa = 0.45 + 0.55 * (k - 1) / Math.max(1, m), fb = 0.45 + 0.55 * k / Math.max(1, m);
             P[j] = px; P[j + 1] = py; P[j + 2] = pz; P[j + 3] = x; P[j + 4] = y; P[j + 5] = z;
-            C[j] = v.col.r * fa; C[j + 1] = v.col.g * fa; C[j + 2] = v.col.b * fa; C[j + 3] = v.col.r * fb; C[j + 4] = v.col.g * fb; C[j + 5] = v.col.b * fb;
+            const cc = k >= wk ? CONTRAIL : v.col; // predicted contrails are drawn white
+            C[j] = cc.r * fa; C[j + 1] = cc.g * fa; C[j + 2] = cc.b * fa; C[j + 3] = cc.r * fb; C[j + 4] = cc.g * fb; C[j + 5] = cc.b * fb;
             n++;
           }
           px = x; py = y; pz = z;
@@ -331,6 +335,45 @@ export class World {
     const g = this.trails.geometry;
     g.attributes.instanceStart.data.needsUpdate = true; g.attributes.instanceColorStart.data.needsUpdate = true;
     g.instanceCount = n;
+  }
+
+  /* ---------- satellites ---------- */
+  buildSats() {
+    const g = new THREE.BufferGeometry(), N = 400;
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(N * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    this.satPts = new THREE.Points(g, new THREE.PointsMaterial({ map: glowTexture(), size: 12, sizeAttenuation: false, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.satPts.frustumCulled = false; this.satPts.renderOrder = 7; this.scene.add(this.satPts);
+    this.orbit = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#7fe7ff', transparent: true, opacity: 0.5, depthWrite: false }));
+    this.orbit.frustumCulled = false; this.orbit.renderOrder = 7; this.scene.add(this.orbit);
+    this.transitGroup = new THREE.Group(); this.homeGroup.add(this.transitGroup);
+  }
+  /** Draw satellites; k runs past 1 to extrapolate from the last two SGP4 fixes until the next update. */
+  syncSats(list, k, on) {
+    const P = this.satPts.geometry.attributes.position.array, C = this.satPts.geometry.attributes.color.array, O = this.O; let i = 0;
+    if (on) for (const s of list) {
+      if (!s.pos || i >= 400) continue;
+      const a = s.prev || s.pos, b = s.pos, x = b.x + (b.x - a.x) * k - O.x, y = b.y + (b.y - a.y) * k - O.y, z = b.z + (b.z - a.z) * k - O.z;
+      (s.scene || (s.scene = new THREE.Vector3())).set(x, y, z);
+      P[i * 3] = x; P[i * 3 + 1] = y; P[i * 3 + 2] = z;
+      const m = s.lit === false ? 0.22 : 1, c = s.star ? [0.55, 1, 1.1] : [0.75, 0.78, 0.9];
+      C[i * 3] = c[0] * m * (s.star ? 1.3 : 0.6); C[i * 3 + 1] = c[1] * m * (s.star ? 1.3 : 0.6); C[i * 3 + 2] = c[2] * m * (s.star ? 1.3 : 0.6);
+      i++;
+    }
+    const g = this.satPts.geometry; g.attributes.position.needsUpdate = g.attributes.color.needsUpdate = true; g.setDrawRange(0, i);
+    this.orbit.visible = on; this.orbit.position.copy(O).negate();
+  }
+  /** The next orbit of the ISS, as earth-centred points. */
+  setOrbit(pts) { this.orbit.geometry.dispose(); this.orbit.geometry = new THREE.BufferGeometry().setFromPoints(pts.map(p => new THREE.Vector3(p.x, p.y, p.z))); }
+  /** Ground lines from which an aircraft crosses the sun or moon dead centre. */
+  setTransitLines(list) {
+    for (const c of [...this.transitGroup.children]) { c.geometry.dispose(); c.material.dispose(); this.transitGroup.remove(c); }
+    for (const tr of list) {
+      const g = new LineGeometry(); g.setPositions(tr.line.flatMap(p => [p.x, -curvDrop(p.x, p.z) + 0.08, p.z]));
+      const m = new LineMaterial({ color: tr.body === 'sun' ? '#FFC53D' : '#CFE0FF', linewidth: 4, transparent: true, opacity: 0.95, depthWrite: false });
+      m.resolution.copy(this.trailMat.resolution);
+      const l = new Line2(g, m); l.computeLineDistances(); l.renderOrder = 3; l.frustumCulled = false; this.transitGroup.add(l);
+    }
   }
 
   /* ---------- camera ---------- */

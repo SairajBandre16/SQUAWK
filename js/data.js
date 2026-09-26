@@ -38,11 +38,20 @@ export const TYPES = {
   C68A: 'Cessna Citation Latitude', C700: 'Cessna Citation Longitude', CL35: 'Bombardier Challenger 350', CL60: 'Bombardier Challenger 600',
   GLF5: 'Gulfstream G550', GLF6: 'Gulfstream G650', GL7T: 'Bombardier Global 7500', GLEX: 'Bombardier Global Express', F2TH: 'Dassault Falcon 2000',
   FA7X: 'Dassault Falcon 7X', FA8X: 'Dassault Falcon 8X', PC24: 'Pilatus PC-24', E55P: 'Embraer Phenom 300', LJ45: 'Learjet 45',
-  EC35: 'Airbus H135', EC45: 'Airbus H145', A139: 'Leonardo AW139', A169: 'Leonardo AW169', S92: 'Sikorsky S-92', R44: 'Robinson R44', AS50: 'Airbus H125'
+  EC35: 'Airbus H135', EC45: 'Airbus H145', A139: 'Leonardo AW139', A169: 'Leonardo AW169', S92: 'Sikorsky S-92', R44: 'Robinson R44', AS50: 'Airbus H125',
+  A124: 'Antonov An-124 Ruslan', A225: 'Antonov An-225 Mriya', A3ST: 'Airbus Beluga', A337: 'Airbus BelugaXL', IL76: 'Ilyushin Il-76', C5M: 'Lockheed C-5M Galaxy',
+  B52: 'Boeing B-52 Stratofortress', E3TF: 'Boeing E-3 Sentry', E3CF: 'Boeing E-3 Sentry', U2: 'Lockheed U-2', MD11: 'McDonnell Douglas MD-11', B742: 'Boeing 747-200',
+  DC3: 'Douglas DC-3', SPIT: 'Supermarine Spitfire', P51: 'North American P-51 Mustang', LANC: 'Avro Lancaster', B17: 'Boeing B-17 Flying Fortress', CONC: 'Concorde'
 };
 export const HEAVY = new Set(['A332', 'A333', 'A338', 'A339', 'A359', 'A35K', 'A388', 'A306', 'A310', 'A343', 'A346', 'B762', 'B763', 'B764', 'B772',
   'B77W', 'B77L', 'B773', 'B779', 'B788', 'B789', 'B78X', 'B744', 'B748', 'B74F', 'C17', 'A400', 'K35R']);
 export const HELI = new Set(['EC35', 'EC45', 'A139', 'A169', 'S92', 'R44', 'AS50']);
+// Aircraft worth an alert when they come near. Military and "interesting" also come from the feed's dbFlags.
+export const RARE = { A388: 'A380 superjumbo', B748: 'Boeing 747-8', B744: 'Boeing 747-400', B742: 'Boeing 747-200', B74F: '747 freighter', A124: 'Antonov An-124',
+  A225: 'Antonov An-225', A3ST: 'Airbus Beluga', A337: 'Airbus BelugaXL', IL76: 'Ilyushin Il-76', C5M: 'C-5 Galaxy', B52: 'B-52 bomber', E3TF: 'AWACS radar plane',
+  E3CF: 'AWACS radar plane', U2: 'U-2 spy plane', B779: 'Boeing 777X', MD11: 'MD-11 trijet', DC3: 'Vintage DC-3', SPIT: 'Spitfire', P51: 'P-51 Mustang',
+  LANC: 'Lancaster bomber', B17: 'B-17 Flying Fortress', C17: 'C-17 Globemaster', A400: 'Airbus A400M', K35R: 'KC-135 tanker' };
+export const rareOf = f => RARE[f.type] || (f.mil ? 'Military' : f.odd ? 'Unusual aircraft' : null);
 export const CATS = { A1: 'Light', A2: 'Small', A3: 'Large', A4: 'Boeing 757 class', A5: 'Heavy', A6: 'High performance', A7: 'Rotorcraft', B1: 'Glider', B2: 'Balloon', B4: 'Ultralight', B6: 'Drone' };
 
 /** Airports used to lay out runways and simulated traffic. [icao, iata, name, lat, lon, landing heading (true), runway km] */
@@ -173,19 +182,23 @@ export async function fetchPhoto(hex) {
   return out;
 }
 
+// pressure levels for the contrail forecast, roughly FL180 to FL450
+export const LEVELS = [500, 400, 300, 250, 200, 150];
 export async function fetchWeather(lat, lon) {
+  const lv = LEVELS.map(p => `temperature_${p}hPa,relative_humidity_${p}hPa`).join(',');
   const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(3)}&longitude=${lon.toFixed(3)}`
     + '&current=temperature_2m,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,visibility,wind_speed_10m,wind_direction_10m,weather_code,is_day'
-    + '&hourly=wind_speed_250hPa,wind_direction_250hPa&daily=sunrise,sunset&timezone=auto&forecast_days=1&wind_speed_unit=kmh';
+    + `&hourly=wind_speed_250hPa,wind_direction_250hPa,${lv}&daily=sunrise,sunset&timezone=auto&forecast_days=1&wind_speed_unit=kmh`;
   const j = await getJSON(u, {}, 9000);
   const c = j.current || {};
-  let jet = null;
+  let jet = null, levels = null;
   if (j.hourly && j.hourly.time) {
     const hr = (c.time || '').slice(0, 13);
     let i = j.hourly.time.findIndex(t => t.slice(0, 13) === hr); if (i < 0) i = 0;
     jet = { speed: j.hourly.wind_speed_250hPa?.[i], dir: j.hourly.wind_direction_250hPa?.[i] };
+    levels = LEVELS.map(p => ({ p, T: j.hourly[`temperature_${p}hPa`]?.[i], rh: j.hourly[`relative_humidity_${p}hPa`]?.[i] })).filter(l => l.T != null && l.rh != null);
   }
-  return { ...c, jet, sunrise: j.daily?.sunrise?.[0], sunset: j.daily?.sunset?.[0], tz: j.timezone, utcOffset: j.utc_offset_seconds };
+  return { ...c, jet, levels, sunrise: j.daily?.sunrise?.[0], sunset: j.daily?.sunset?.[0], tz: j.timezone, utcOffset: j.utc_offset_seconds };
 }
 
 export async function geocode(q) {
