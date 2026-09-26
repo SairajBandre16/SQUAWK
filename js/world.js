@@ -6,17 +6,21 @@ import { Sky } from 'three/addons/objects/Sky.js';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { Globe, TILE_STYLES } from './globe.js';
+import { MODELS, modelGeometry, modelSize } from './models.js';
 import { D2R, EARTH_R, clamp, lerp, smooth, curvDrop, sunPosition, unitDir, enu, toLatLon, haversine, step } from './geo.js';
 
 export { TILE_STYLES };
 const MAXP = 9000, TRAIL_F = 500, TRAIL_N = 80, TRAIL_EVERY = 1.0;
 export const HOME_R = 95, SPACE_R = 22000;
+// zoomed in closer than this, a left-drag orbits the camera in 3D; further out it pans the globe
+const ORBIT_R = 700;
 export const RINGS = [10, 25, 50, 100, 150];
 export const COL = {
   low: new THREE.Color('#FF9F1C'), mid: new THREE.Color('#FF3D8B'), high: new THREE.Color('#29C5FF'),
@@ -28,6 +32,7 @@ export function altColor(km, out) {
 }
 // nav lights in the model's frame: x, y, z offset, then r, g, b
 const NAV = [[-0.53, 0, 0.1, 1, 0.12, 0.15], [0.53, 0, 0.1, 0.1, 1, 0.35], [0, 0.02, 0.6, 1, 1, 1], [0, -0.07, 0, 1, 0.1, 0.1]];
+const CONTRAIL = new THREE.Color(0.93, 0.95, 1);
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 const ease = k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
 
@@ -64,23 +69,6 @@ function glowTexture() {
   g.fillStyle = gr; g.fillRect(0, 0, 64, 64); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
 
-function planeGeometry() {
-  const shear = (g, k) => { const p = g.attributes.position; for (let i = 0; i < p.count; i++) p.setZ(i, p.getZ(i) + Math.abs(p.getX(i)) * k); g.computeVertexNormals(); return g; };
-  const parts = [
-    new THREE.CylinderGeometry(0.045, 0.056, 1, 12).rotateX(Math.PI / 2),
-    new THREE.ConeGeometry(0.056, 0.17, 12).rotateX(-Math.PI / 2).translate(0, 0, -0.585),
-    new THREE.ConeGeometry(0.045, 0.12, 12).rotateX(Math.PI / 2).translate(0, 0.01, 0.56),
-    shear(new THREE.BoxGeometry(1.02, 0.018, 0.17), 0.32).translate(0, -0.015, -0.02),
-    shear(new THREE.BoxGeometry(0.36, 0.014, 0.085), 0.35).translate(0, 0.02, 0.43),
-    new THREE.BoxGeometry(0.014, 0.19, 0.13).translate(0, 0.105, 0.46),
-    new THREE.CylinderGeometry(0.034, 0.03, 0.15, 10).rotateX(Math.PI / 2).translate(0.23, -0.055, -0.06),
-    new THREE.CylinderGeometry(0.034, 0.03, 0.15, 10).rotateX(Math.PI / 2).translate(-0.23, -0.055, -0.06)
-  ];
-  const fin = parts[5].attributes.position; for (let i = 0; i < fin.count; i++) fin.setZ(i, fin.getZ(i) + fin.getY(i) * 0.7);
-  parts[5].computeVertexNormals();
-  return mergeGeometries(parts.map(g => g.toNonIndexed()));
-}
-
 export class World {
   constructor(canvas) {
     this.canvas = canvas;
@@ -100,7 +88,7 @@ export class World {
     this.vis = new Map(); this.cloudsOn = true; this.day = 1;
     this.homeGroup = new THREE.Group(); this.homeGroup.matrixAutoUpdate = false; this.scene.add(this.homeGroup);
     this.globe = new Globe(this.renderer, this.scene);
-    this.buildSky(); this.buildClouds(); this.buildAircraft(); this.buildObserver();
+    this.buildSky(); this.buildClouds(); this.buildAircraft(); this.buildObserver(); this.buildSats();
     this.airportGroup = new THREE.Group(); this.homeGroup.add(this.airportGroup);
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
@@ -176,6 +164,7 @@ export class World {
   /* ---------- ground ---------- */
   setStyle(style) { this.style = style; this.globe.setStyle(style); }
   setNames(on) { this.globe.setNames(on); }
+  setRadar(on) { this.globe.setRadar(on); }
   tileProgress() { return this.globe.progress; }
 
   buildClouds() {
@@ -214,11 +203,14 @@ export class World {
 
   /* ---------- aircraft ---------- */
   buildAircraft() {
+    // one body and one tail InstancedMesh per aircraft family; the tail carries the airline colour
     const mat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.38, metalness: 0.25, emissive: '#1b2230' });
-    this.planes = new THREE.InstancedMesh(planeGeometry(), mat, MAXP);
-    this.planes.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.planes.count = 0; this.planes.frustumCulled = false;
-    this.planes.setColorAt(0, new THREE.Color(1, 1, 1));
-    this.scene.add(this.planes);
+    const tmat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.5, metalness: 0.1, emissive: '#10141c' });
+    this.models = {};
+    for (const k of MODELS) {
+      const g = modelGeometry(k), mk = (geo, m) => { const im = new THREE.InstancedMesh(geo, m, MAXP); im.instanceMatrix.setUsage(THREE.DynamicDrawUsage); im.count = 0; im.frustumCulled = false; im.setColorAt(0, new THREE.Color(1, 1, 1)); this.scene.add(im); return im; };
+      this.models[k] = { body: mk(g.body, mat), tail: mk(g.tail, tmat), size: modelSize(k), n: 0 };
+    }
     const glow = glowTexture();
     const mk = (n, size, blending, opacity) => {
       const g = new THREE.BufferGeometry();
@@ -257,6 +249,7 @@ export class World {
     const lp = this.lights.geometry.attributes.position.array, lc = this.lights.geometry.attributes.color.array, dp = this.drops.geometry.attributes.position.array;
     const kLerp = 1 - Math.exp(-dt * 5), kYaw = 1 - Math.exp(-dt * 4), glow = 0.35 + 0.65 * (1 - this.day * 0.6);
     let i = 0, ip = 0; // i: every aircraft (halo dot); ip: aircraft near enough to draw as a 3D model
+    for (const k in this.models) this.models[k].n = 0;
     for (const f of flights) {
       if (i >= MAXP) break;
       seen.add(f.id);
@@ -278,8 +271,10 @@ export class World {
         const pitch = clamp(Math.atan2(f.vr * this.altScale, f.spd + 1e-4) * 0.7, -0.22, 0.32), bank = clamp(-(f.turn || 0) * 0.14, -0.45, 0.45);
         this.tmpE.set(pitch, v.yaw, bank, 'YXZ'); this.tmpQ2.setFromEuler(this.tmpE);
         this.tmpQ.setFromRotationMatrix(this.tmpM.makeBasis(e, u, s)).multiply(this.tmpQ2);
-        this.tmpM.compose(v.pos, this.tmpQ, this.tmpS.setScalar(sc)); this.planes.setMatrixAt(ip, this.tmpM);
-        this.tmpC.copy(v.col).lerp(COL.white, sel ? 0.75 : 0.42); this.planes.setColorAt(ip, this.tmpC); ip++;
+        const M = this.models[f.model] || this.models.narrow, j = M.n++;
+        this.tmpM.compose(v.pos, this.tmpQ, this.tmpS.setScalar(sc * M.size)); M.body.setMatrixAt(j, this.tmpM); M.tail.setMatrixAt(j, this.tmpM);
+        this.tmpC.copy(v.col).lerp(COL.white, sel ? 0.75 : 0.42); M.body.setColorAt(j, this.tmpC);
+        if (f.livery) this.tmpC.set(f.livery).lerp(COL.white, sel ? 0.3 : 0); M.tail.setColorAt(j, this.tmpC); ip++;
       }
       hp[i * 3] = v.pos.x; hp[i * 3 + 1] = v.pos.y; hp[i * 3 + 2] = v.pos.z;
       const hk = sel ? 1 : 0.9; hc[i * 3] = v.col.r * hk; hc[i * 3 + 1] = v.col.g * hk; hc[i * 3 + 2] = v.col.b * hk;
@@ -298,7 +293,10 @@ export class World {
       i++;
     }
     for (const id of this.vis.keys()) if (!seen.has(id)) this.vis.delete(id);
-    this.planes.count = ip; this.planes.instanceMatrix.needsUpdate = true; if (this.planes.instanceColor) this.planes.instanceColor.needsUpdate = true;
+    for (const k in this.models) {
+      const M = this.models[k];
+      for (const im of [M.body, M.tail]) { if (!im.count && !M.n) continue; im.count = M.n; im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true; }
+    }
     for (const p of [this.halo, this.lights]) { p.geometry.attributes.position.needsUpdate = true; p.geometry.attributes.color.needsUpdate = true; }
     this.halo.geometry.setDrawRange(0, i); this.lights.geometry.setDrawRange(0, i * 4);
     this.drops.geometry.attributes.position.needsUpdate = true; this.drops.geometry.setDrawRange(0, i * 2);
@@ -313,7 +311,7 @@ export class World {
       if (list.length > TRAIL_F) list = list.sort((a, b) => a[2] - b[2]).slice(0, TRAIL_F);
       for (const [f, v] of list) {
         if (!v.filled) this.backfill(f, v);
-        const tr = v.trail, m = tr.length;
+        const tr = v.trail, m = tr.length, wk = f.ctr === 'persistent' ? 0 : f.ctr === 'short' ? m - 10 : m + 1;
         let px = null, py, pz;
         for (let k = 0; k <= m && n < TRAIL_F * TRAIL_N; k++) {
           let x, y, z;
@@ -321,7 +319,8 @@ export class World {
           if (px !== null) {
             const j = n * 6, fa = 0.45 + 0.55 * (k - 1) / Math.max(1, m), fb = 0.45 + 0.55 * k / Math.max(1, m);
             P[j] = px; P[j + 1] = py; P[j + 2] = pz; P[j + 3] = x; P[j + 4] = y; P[j + 5] = z;
-            C[j] = v.col.r * fa; C[j + 1] = v.col.g * fa; C[j + 2] = v.col.b * fa; C[j + 3] = v.col.r * fb; C[j + 4] = v.col.g * fb; C[j + 5] = v.col.b * fb;
+            const cc = k >= wk ? CONTRAIL : v.col; // predicted contrails are drawn white
+            C[j] = cc.r * fa; C[j + 1] = cc.g * fa; C[j + 2] = cc.b * fa; C[j + 3] = cc.r * fb; C[j + 4] = cc.g * fb; C[j + 5] = cc.b * fb;
             n++;
           }
           px = x; py = y; pz = z;
@@ -331,6 +330,45 @@ export class World {
     const g = this.trails.geometry;
     g.attributes.instanceStart.data.needsUpdate = true; g.attributes.instanceColorStart.data.needsUpdate = true;
     g.instanceCount = n;
+  }
+
+  /* ---------- satellites ---------- */
+  buildSats() {
+    const g = new THREE.BufferGeometry(), N = 400;
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(N * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    this.satPts = new THREE.Points(g, new THREE.PointsMaterial({ map: glowTexture(), size: 12, sizeAttenuation: false, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.satPts.frustumCulled = false; this.satPts.renderOrder = 7; this.scene.add(this.satPts);
+    this.orbit = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#7fe7ff', transparent: true, opacity: 0.5, depthWrite: false }));
+    this.orbit.frustumCulled = false; this.orbit.renderOrder = 7; this.scene.add(this.orbit);
+    this.transitGroup = new THREE.Group(); this.homeGroup.add(this.transitGroup);
+  }
+  /** Draw satellites; k runs past 1 to extrapolate from the last two SGP4 fixes until the next update. */
+  syncSats(list, k, on) {
+    const P = this.satPts.geometry.attributes.position.array, C = this.satPts.geometry.attributes.color.array, O = this.O; let i = 0;
+    if (on) for (const s of list) {
+      if (!s.pos || i >= 400) continue;
+      const a = s.prev || s.pos, b = s.pos, x = b.x + (b.x - a.x) * k - O.x, y = b.y + (b.y - a.y) * k - O.y, z = b.z + (b.z - a.z) * k - O.z;
+      (s.scene || (s.scene = new THREE.Vector3())).set(x, y, z);
+      P[i * 3] = x; P[i * 3 + 1] = y; P[i * 3 + 2] = z;
+      const m = s.lit === false ? 0.22 : 1, c = s.star ? [0.55, 1, 1.1] : [0.75, 0.78, 0.9];
+      C[i * 3] = c[0] * m * (s.star ? 1.3 : 0.6); C[i * 3 + 1] = c[1] * m * (s.star ? 1.3 : 0.6); C[i * 3 + 2] = c[2] * m * (s.star ? 1.3 : 0.6);
+      i++;
+    }
+    const g = this.satPts.geometry; g.attributes.position.needsUpdate = g.attributes.color.needsUpdate = true; g.setDrawRange(0, i);
+    this.orbit.visible = on; this.orbit.position.copy(O).negate();
+  }
+  /** The next orbit of the ISS, as earth-centred points. */
+  setOrbit(pts) { this.orbit.geometry.dispose(); this.orbit.geometry = new THREE.BufferGeometry().setFromPoints(pts.map(p => new THREE.Vector3(p.x, p.y, p.z))); }
+  /** Ground lines from which an aircraft crosses the sun or moon dead centre. */
+  setTransitLines(list) {
+    for (const c of [...this.transitGroup.children]) { c.geometry.dispose(); c.material.dispose(); this.transitGroup.remove(c); }
+    for (const tr of list) {
+      const g = new LineGeometry(); g.setPositions(tr.line.flatMap(p => [p.x, -curvDrop(p.x, p.z) + 0.08, p.z]));
+      const m = new LineMaterial({ color: tr.body === 'sun' ? '#FFC53D' : '#CFE0FF', linewidth: 4, transparent: true, opacity: 0.95, depthWrite: false });
+      m.resolution.copy(this.trailMat.resolution);
+      const l = new Line2(g, m); l.computeLineDistances(); l.renderOrder = 3; l.frustumCulled = false; this.transitGroup.add(l);
+    }
   }
 
   /* ---------- camera ---------- */
@@ -406,15 +444,18 @@ export class World {
     c.r = r1;
   }
 
-  /* ---------- input: drag moves the map, right-drag (or shift/ctrl-drag, or two fingers) turns and tilts ---------- */
+  /* ---------- input ----------
+     Zoomed in (orbit view): drag orbits and tilts, right-drag (or shift/ctrl/alt-drag) pans, two fingers pinch, twist and pan.
+     Zoomed out, or in map view: drag pans, right-drag turns (and tilts in orbit view). */
   bindInput() {
     const el = this.canvas, ptrs = new Map(); let drag = null, two = null;
-    const gesture = () => { const [a, b] = [...ptrs.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x), my: (a.y + b.y) / 2 }; };
+    const gesture = () => { const [a, b] = [...ptrs.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, a: Math.atan2(b.y - a.y, b.x - a.x), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 }; };
     const touch = () => { this.lastInteract = this.clock.elapsedTime; this.fly = null; this.onInteract && this.onInteract(); };
     el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerdown', e => {
       el.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }); this.inertia = null;
-      if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, moved: 0, rot: e.button === 2 || e.button === 1 || e.shiftKey || e.ctrlKey || e.altKey, vx: 0, vy: 0, t: performance.now() };
+      const alt = e.button === 2 || e.button === 1 || e.shiftKey || e.ctrlKey || e.altKey;
+      if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, moved: 0, rot: this.orbitDrag() ? !alt : alt, vx: 0, vy: 0, t: performance.now() };
       if (ptrs.size === 2) { two = gesture(); drag = null; }
       touch();
     });
@@ -423,7 +464,7 @@ export class World {
       const c = this.cam;
       if (ptrs.size === 2 && two) {
         const g = gesture(); this.zoom(two.d / g.d);
-        if (this.mode !== 'ground') { c.theta += ((g.a - two.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI; if (this.mode === 'orbit') c.phi = clamp(c.phi - (g.my - two.my) * 0.004, 0, 1.45); }
+        if (this.mode !== 'ground') { c.theta += ((g.a - two.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI; if (!this.fol) this.pan(g.mx - two.mx, g.my - two.my); }
         two = g; touch(); return;
       }
       if (!drag) return;
@@ -441,7 +482,7 @@ export class World {
     });
     const end = e => {
       if (drag && drag.moved < 6 && e.type === 'pointerup' && ptrs.size === 1) this.onPick && this.onPick(e.clientX, e.clientY);
-      else if (drag && !drag.rot && this.mode !== 'ground' && performance.now() - drag.t < 80 && Math.hypot(drag.vx, drag.vy) > 300 && !reduced()) this.inertia = { vx: drag.vx, vy: drag.vy };
+      else if (drag && !drag.rot && this.mode !== 'ground' && performance.now() - drag.t < 80 && Math.hypot(drag.vx, drag.vy) > 300 && !reduced()) { const v = Math.hypot(drag.vx, drag.vy), k = Math.min(1, 2200 / v); this.inertia = { vx: drag.vx * k, vy: drag.vy * k }; }
       ptrs.delete(e.pointerId); if (ptrs.size < 2) two = null; if (!ptrs.size) drag = null;
     };
     el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
@@ -451,6 +492,7 @@ export class World {
       const hit = this.groundAt(e.clientX, e.clientY); if (hit) this.flyTo(hit.lat, hit.lon, Math.max(1, this.cam.r * 0.35), { dur: 0.9 });
     });
   }
+  orbitDrag() { return this.mode === 'orbit' && (this.fol ? Math.min(this.cam.r, 30) : this.cam.r) < ORBIT_R; }
   resize(w, h) {
     this.w = w; this.h = h;
     this.renderer.setSize(w, h, false); this.composer.setSize(w, h);
@@ -479,7 +521,7 @@ export class World {
     else if (this.inertia) {
       const iv = this.inertia; this.pan(iv.vx * dt, iv.vy * dt); const k = Math.exp(-dt * 4); iv.vx *= k; iv.vy *= k;
       if (Math.hypot(iv.vx, iv.vy) < 20) this.inertia = null;
-    } else if (this.mode === 'orbit' && t - this.lastInteract > 6 && !followPos && c.r < 1500 && !reduced()) c.theta += dt * 0.025;
+    } else if (this.mode === 'orbit' && (t - this.lastInteract > 6 || this.cinematic) && !followPos && c.r < 1500 && !reduced()) c.theta += dt * (this.cinematic ? 0.05 : 0.025);
     if (followPos) { const ll = toLatLon(followPos.x + this.O.x, followPos.y + this.O.y, followPos.z + this.O.z); c.lat = ll.lat; c.lon = ll.lon; c.h = ll.h; }
     // keep the floating origin near what we're looking at
     const anchor = ground ? this.llToScene(this.homeLL.lat, this.homeLL.lon, 0, this.tmpV) : this.llToScene(c.lat, c.lon, c.h, this.tmpV);
