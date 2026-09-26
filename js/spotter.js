@@ -31,14 +31,15 @@ export const FAMILIES = [
 export const familyOf = type => type ? FAMILIES.find(f => f.re.test(type)) || null : null;
 
 /* ---------------- levels ---------------- */
-export const LEVELS = [[0, 'Sky curious'], [50, 'Runway rookie'], [150, 'Contrail chaser'], [300, 'Sky watcher'], [500, 'Spotter'], [800, 'Keen spotter'],
-  [1200, 'Ace spotter'], [1800, 'Tower regular'], [2600, 'Aviation buff'], [3600, 'Sky master'], [5000, 'Legend of the skies']];
+// the first session gets you to level 2 or 3; after that it takes regular spotting
+export const LEVELS = [[0, 'Sky curious'], [100, 'Runway rookie'], [250, 'Contrail chaser'], [500, 'Sky watcher'], [900, 'Spotter'], [1500, 'Keen spotter'],
+  [2400, 'Ace spotter'], [3600, 'Tower regular'], [5200, 'Aviation buff'], [7500, 'Sky master'], [10000, 'Legend of the skies']];
 export function levelOf(xp) {
   let i = 0; while (i < LEVELS.length - 1 && xp >= LEVELS[i + 1][0]) i++;
   const next = LEVELS[i + 1];
   return { n: i + 1, name: LEVELS[i][1], xp, from: LEVELS[i][0], to: next ? next[0] : null, pct: next ? (xp - LEVELS[i][0]) / (next[0] - LEVELS[i][0]) : 1 };
 }
-export const XP = { catch: 2, type: 25, airline: 10, badge: 50, seen: 20, seenType: 30, mission: 40 };
+export const XP = { catch: 1, type: 10, airline: 5, badge: 25, seen: 25, seenType: 25, mission: 30 };
 
 /* ---------------- daily missions ---------------- */
 // Each check gets the day's record and the event that just happened; it returns true once the mission is done.

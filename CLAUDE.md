@@ -7,7 +7,7 @@ This file gives Claude Code guidance for working in this repository.
 Squawk is a static, no-build, browser-only 3D plane-spotting app. It shows live ADS-B aircraft around a chosen location over satellite imagery, with a real sun position, live-weather clouds and a "where to look" dial. When no live feed is reachable it falls back to simulated traffic.
 
 - Plain ES modules, no bundler, no `package.json`, no tests, no linter.
-- three.js r170 loads from jsDelivr through the import map in `index.html` (`three` and `three/addons/`).
+- three.js r170 and satellite.js 6 load from jsDelivr through the import map in `index.html` (`three`, `three/addons/`, `satellite.js`).
 - Fonts load from Google Fonts. Everything else is local.
 
 ## Running
@@ -47,6 +47,10 @@ js/world.js       World class: scene, floating origin, sky/sun, home group (pin,
 js/globe.js       Globe class: streaming web-mercator tiles on a sphere (quadtree LOD), names and night-light overlays, ocean, ice caps, atmosphere.
 js/data.js        Reference tables (airlines, types, airports, places) and all network calls.
 js/sim.js         Sim class: simulated arrivals, departures and overflights around the nearest airport.
+js/predict.js     closestApproach(), transits() with the ground centreline, contrailAt() (Schmidt-Appleman) and pressureAt().
+js/sats.js        Sats class: CelesTrak elements (cached 6 h in localStorage), SGP4 positions, sunlit test, visible-pass search.
+js/models.js      Ten low-poly model families (body + tail fin), modelOf(type, category), LIVERY tail colours by airline.
+js/spotter.js     FAMILIES for the collection, levels and XP, daily missions, streak, plainFacts(), silhouettes.
 js/geo.js         Local projection (Proj), earth-centred frame helpers, haversine/bearing, relative(), sun position, compass helpers.
 ```
 
@@ -73,6 +77,14 @@ js/geo.js         Local projection (Proj), earth-centred frame helpers, haversin
 - `frame()` is the requestAnimationFrame loop and calls `tick(dt)`. It steps sim or reckon, calls `world.syncAircraft` and `world.frame`, then updates labels every frame and runs throttled work through the `acc` timers: HUD and explore pill 0.5 s, card 0.3 s, records and `followView` 1 s, history 20 s, board 3 s, stats and log panels 3 s.
 - `S.booting` suppresses toasts and events while a batch of flights is added at once. Flights added then are marked `quiet`, so their later catch doesn't toast either.
 
+### Look-ahead, satellites and the hobby layer
+
+- `predictAll()` in `main.js` runs every 2 s over aircraft within about 450 km of home. It sets `f.next` (closest approach), `f.ctr` (contrail state) and `S.pred = { at, over, tr, rare }`, and fires `ping()` alerts once per key (`S.alerted`). Times in `S.pred` are seconds from `S.pred.at`, so subtract the age when displaying.
+- Alerts: `ping()` always shows the dark toast and logs an event; the chime, vibration and system notification only happen when `settings.alerts` is on.
+- Transit lines are drawn by `world.setTransitLines()` in the home group. The contrail forecast needs the pressure-level fields in `S.weather.levels` (`fetchWeather()` in `data.js`).
+- Satellites: `startSats()` loads after the intro; `tickSats()` refreshes positions each second and passes every 30 min; `world.syncSats()` extrapolates between fixes. Satellite coordinates are converted from satellite.js ECF (x lon 0, y lon 90E, z north) to the globe frame (x = ecf.y, y = ecf.z, z = ecf.x).
+- Hobby layer: `gain(xp)`, `mission(event)`, `dayRec()` and `sawIt(f)` live in `main.js`; the numbers and definitions are in `spotter.js`. The log (`squawk.log.v2`) now also has `xp`, `seen`, `seenTypes`, `days` and `day`. The first-sighting guide (`coach*`) runs once per browser (`squawk.coach`), and only when a plane is 8° to 75° up within 50 km.
+
 ### Rendering (`js/world.js`, `js/globe.js`)
 
 - `World` owns the renderer (logarithmic depth buffer, far plane 90000 km), the EffectComposer with bloom, and camera state in `world.cam`: `lat`, `lon`, `h` (target), `r` (range), `theta` (heading), `phi` (tilt), plus `yaw`, `pitch`, `fov` for ground view. Camera modes are `orbit`, `top` and `ground`. "Globe" is orbit or map zoomed out past about 6000 km; tilt eases to straight down as you zoom out (`effPhi`).
@@ -81,7 +93,7 @@ js/geo.js         Local projection (Proj), earth-centred frame helpers, haversin
 - Tile shading happens in a shader patch (`patch()` in `globe.js`). It tints by the real sun per fragment (day/night terminator, golden hour), blends the Esri names overlay (zoom 13 and below) and adds Black Marble city lights on the night side. Deeper tiles borrow a corner of an ancestor's overlay image (`bindAux`).
 - The ocean sphere sits 30 km and the ice caps 20 km below the surface. Coarse tiles sag between vertices, and a shallower base pokes through as a diamond pattern.
 - Sky: the three.js `Sky` box and the star field follow the camera, and `up` is the local vertical. Above about 40 to 260 km the sky fades to space and the atmosphere shells in `globe.js` fade in. Fog thins as you zoom out and is zero in space.
-- Aircraft: one `InstancedMesh` for 3D models, drawn only for aircraft within 3000 km of the camera (or selected). Halo points cover every aircraft (max `MAXP = 9000`), plus nav lights (within 800 km), drop lines and `LineSegments2` trails (nearest `TRAIL_F = 500`, only when `r < 4000`). Per-flight visual state lives in `world.vis`: smoothed scene `pos`, `yaw`, `trail` (unit direction plus altitude, so trails survive a rebase) and `col`.
+- Aircraft: per model family, one body and one tail `InstancedMesh` (`world.models`), drawn only for aircraft within 3000 km of the camera (or selected). `f.model` and `f.livery` are set by `dress()` in `main.js`. Halo points cover every aircraft (max `MAXP = 9000`), plus nav lights (within 800 km), drop lines and `LineSegments2` trails (nearest `TRAIL_F = 500`, only when `r < 4000`). Per-flight visual state lives in `world.vis`: smoothed scene `pos`, `yaw`, `trail` (unit direction plus altitude, so trails survive a rebase) and `col`.
 - Colour encodes altitude through `altColor()` (low amber, mid pink, high blue). Emergencies are red.
 - `setSun(date)` computes the sun at home and turns it into one scene-space direction, which is valid for the whole globe. It drives sky, lights, fog colour, globe shading, clouds and bloom. `main.js` then sets `data-sky` to day or night, and the CSS theme follows.
 - Picking: `world.onPick(x, y)` is set by `main.js` and does a screen-space nearest search. `world.project()` marks points behind the earth as not visible.
@@ -105,4 +117,6 @@ js/geo.js         Local projection (Proj), earth-centred frame helpers, haversin
 
 - With a continent-sized region (3500 nm), ADSB.lol returns 5,000 to 12,000 aircraft and several MB of JSON every 30 s. That is heavy on mobile data. A shared relay IP (Vercel, Netlify, Worker) can also hit ADSB.lol rate limits (429).
 - ADSB.lol coverage is thin in some regions (for example, parts of India).
-- Weather, clouds, runways and range rings exist only around home.
+- Weather, clouds, runways, range rings and the contrail forecast exist only around home.
+- adsbdb.com routes are keyed by callsign and are sometimes stale; `routeFits()` hides a route the aircraft is nowhere near.
+- RainViewer serves radar only up to zoom 7; deeper globe tiles borrow and stretch a zoom-7 image.
