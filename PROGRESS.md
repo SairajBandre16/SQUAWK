@@ -8,7 +8,8 @@ _Last updated: 27 Sept 2026_
 
 - **Live site:** Vercel deploys `main` to production and every other branch to a preview URL.
 - **Branches:** `main` and `globe` both contain everything below, and work continues on `globe`.
-- **Deploy:** as of commit `3eb1348` on `main`, the production deployment built successfully.
+- **Deploy:** the compass, sky camera and location prompt (`43f46e9`) were merged into `main` as `2f0cd89` and pushed to production.
+- **Waiting on:** testing on real phones (iPhone and Android). Everything was only tested in desktop Chrome with fake sensor readings. Fix anything the owner finds on `globe` first.
 
 ## Done
 
@@ -53,6 +54,7 @@ _Last updated: 27 Sept 2026_
 - [x] First visit asks for your location (after a time-zone guess instead of always Dublin); returning visitors with location allowed follow where they are
 - [x] The card's sky dial is now a compass: on phones it turns with you and says "Turn right 40°, look 26° up"
 - [x] Sky camera: point the phone at the sky to name the planes, tap to track, drag to fix the compass
+- [ ] Test on real phones: compass direction and iOS permission, camera field of view (tags line up with real planes), landscape, the welcome card, and moving home by location on return visits
 
 ## Next up
 
