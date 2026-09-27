@@ -176,5 +176,13 @@
 
 <noscript><p class="nojs">Squawk needs JavaScript and WebGL to draw the sky.</p></noscript>
 <script type="module" src="js/main.js"></script>
+<script>
+// If the app never starts (old browser without import maps, or the CDN is blocked), say so instead of spinning forever.
+(function () {
+  var fail = function (m) { var el = document.getElementById('loadMsg'); if (el && !window.__squawk && el.textContent === 'Tuning to 1090 MHz') el.textContent = m; };
+  if (!(window.HTMLScriptElement && HTMLScriptElement.supports && HTMLScriptElement.supports('importmap'))) fail('This browser is too old to run Squawk. Try an up-to-date Chrome, Edge, Firefox or Safari.');
+  else setTimeout(function () { fail('Squawk could not load. Check your connection and reload the page.'); }, 25000);
+})();
+</script>
 </body>
 </html>

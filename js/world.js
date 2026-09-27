@@ -18,6 +18,8 @@ import { D2R, EARTH_R, clamp, lerp, smooth, curvDrop, sunPosition, unitDir, enu,
 
 export { TILE_STYLES };
 const MAXP = 9000, TRAIL_F = 500, TRAIL_N = 80, TRAIL_EVERY = 1.0;
+// mark the first n array entries of a (possibly interleaved) buffer for upload; nothing to send when n is 0
+const upd = (a, n) => { if (!n) return; a.clearUpdateRanges(); a.addUpdateRange(0, n); a.needsUpdate = true; };
 export const HOME_R = 95, SPACE_R = 22000;
 // zoomed in closer than this, a left-drag orbits the camera in 3D; further out it pans the globe
 const ORBIT_R = 700;
@@ -115,8 +117,9 @@ export class World {
     for (const v of this.vis.values()) v.pos.sub(by);
     this.placeHome(); this.trailClock = 1;
   }
-  focus() { return { lat: this.cam.lat, lon: this.cam.lon }; }
-  viewRadius() { return Math.min(this.cam.r * 0.9, 9000); }
+  // where the view is, or where it's headed while a flight is under way
+  focus() { const c = this.fly ? this.fly.b : this.cam; return { lat: c.lat, lon: c.lon }; }
+  viewRadius() { return Math.min((this.fly ? this.fly.b : this.cam).r * 0.9, 9000); }
   homeDist() { return haversine(this.homeLL.lat, this.homeLL.lon, this.cam.lat, this.cam.lon); }
 
   /* ---------- sky, sun, weather ---------- */
@@ -293,13 +296,16 @@ export class World {
       i++;
     }
     for (const id of this.vis.keys()) if (!seen.has(id)) this.vis.delete(id);
+    // upload only the part of each buffer in use: they are sized for MAXP aircraft, and sending them whole every frame
+    // costs several MB of GPU traffic even with a handful of planes
     for (const k in this.models) {
       const M = this.models[k];
-      for (const im of [M.body, M.tail]) { if (!im.count && !M.n) continue; im.count = M.n; im.instanceMatrix.needsUpdate = true; if (im.instanceColor) im.instanceColor.needsUpdate = true; }
+      for (const im of [M.body, M.tail]) { im.count = M.n; upd(im.instanceMatrix, M.n * 16); if (im.instanceColor) upd(im.instanceColor, M.n * 3); }
     }
-    for (const p of [this.halo, this.lights]) { p.geometry.attributes.position.needsUpdate = true; p.geometry.attributes.color.needsUpdate = true; }
+    upd(this.halo.geometry.attributes.position, i * 3); upd(this.halo.geometry.attributes.color, i * 3);
+    upd(this.lights.geometry.attributes.position, i * 12); upd(this.lights.geometry.attributes.color, i * 12);
     this.halo.geometry.setDrawRange(0, i); this.lights.geometry.setDrawRange(0, i * 4);
-    this.drops.geometry.attributes.position.needsUpdate = true; this.drops.geometry.setDrawRange(0, i * 2);
+    upd(this.drops.geometry.attributes.position, i * 6); this.drops.geometry.setDrawRange(0, i * 2);
     if ((this.trailClock += dt) > 0.1) { this.trailClock = 0; this.buildTrails(flights); }
   }
   buildTrails(flights) {
@@ -328,7 +334,7 @@ export class World {
       }
     }
     const g = this.trails.geometry;
-    g.attributes.instanceStart.data.needsUpdate = true; g.attributes.instanceColorStart.data.needsUpdate = true;
+    upd(g.attributes.instanceStart.data, n * 6); upd(g.attributes.instanceColorStart.data, n * 6);
     g.instanceCount = n;
   }
 

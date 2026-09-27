@@ -127,19 +127,22 @@ export async function fetchAircraft(lat, lon, nm) {
   // sources that can serve the whole radius first, then the one that worked last time
   const rank = s => (s.max >= nm ? 0 : 2) + (s.key === lastGood ? 0 : 1);
   const list = sources().sort((a, b) => rank(a) - rank(b));
-  let lastErr;
+  let lastErr, rated;
   for (const s of list) {
     try {
-      const r = await fetch(s.make(lat.toFixed(4), lon.toFixed(4), Math.min(nm, s.max)), { cache: 'no-store', signal: AbortSignal.timeout ? AbortSignal.timeout(nm > 500 ? 25000 : 8000) : undefined });
+      const n = Math.min(nm, s.max);
+      const r = await fetch(s.make(lat.toFixed(4), lon.toFixed(4), n), { cache: 'no-store', signal: AbortSignal.timeout ? AbortSignal.timeout(n > 500 ? 25000 : 8000) : undefined });
       const ct = r.headers.get('content-type') || '';
       if (r.status === 429) throw Object.assign(new Error('rate limited'), { rate: true });
-      if (!r.ok || !ct.includes('json')) { if ([401, 403, 404, 405].includes(r.status) || !ct.includes('json')) dead.add(s.key); throw new Error('HTTP ' + r.status); }
+      // only a refusal, or a page served in place of the API (a static host's fallback), rules a source out;
+      // a 5xx or a proxy's error page is usually passing trouble, so it is tried again next poll
+      if (!r.ok || !ct.includes('json')) { if ([401, 403, 404, 405].includes(r.status) || (r.ok && !ct.includes('json'))) dead.add(s.key); throw new Error('HTTP ' + r.status); }
       const j = await r.json(); const ac = j.ac || j.aircraft;
       if (!Array.isArray(ac)) throw new Error('bad payload');
       lastGood = s.key; return { list: ac, provider: s.name };
-    } catch (e) { lastErr = e; if (e instanceof TypeError && s.key.startsWith('direct:')) dead.add(s.key); }
+    } catch (e) { lastErr = e; if (e.rate) rated = e; if (e instanceof TypeError && s.key.startsWith('direct:')) dead.add(s.key); }
   }
-  throw lastErr || new Error('no provider');
+  throw rated || lastErr || new Error('no provider');
 }
 
 // Routes from adsbdb.com (CORS-enabled), one callsign at a time, cached and throttled.

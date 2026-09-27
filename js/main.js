@@ -15,8 +15,11 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 };
 const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', names: true, sats: true, radar: false, alerts: false, relay: '' }, store.get('squawk.settings', {}));
-{ const q = new URLSearchParams(location.search).get('relay'); if (q) settings.relay = q; }
-D.feedConfig.relayUrl = settings.relay;
+// a relay must be a full https URL (plain http only while Squawk itself runs on http, e.g. localhost)
+const relayOK = s => { try { const u = new URL(s); return u.protocol === 'https:' || (u.protocol === 'http:' && location.protocol === 'http:'); } catch (e) { return false; } };
+if (settings.relay && !relayOK(settings.relay)) settings.relay = '';
+// ?relay= only lasts for this visit: a shared link can't quietly reroute the feed for good
+{ const q = new URLSearchParams(location.search).get('relay'); D.feedConfig.relayUrl = q && relayOK(q) ? q : settings.relay; }
 const saveSettings = () => store.set('squawk.settings', settings);
 const S = { flights: new Map(), mode: 'boot', provider: '', selId: null, follow: false, tab: 'sky', view: 'orbit', weather: null, timeOff: 0,
   events: [], history: [], rec: {}, booting: false, quiet: false, feedResolved: false, region: null, proj: null, sim: null,
@@ -32,6 +35,7 @@ const dur = s => s < 90 ? Math.round(s) + ' s' : s < 3600 ? Math.round(s / 60) +
 const mmss = t => t >= 3600 ? Math.floor(t / 3600) + 'h ' + String(Math.floor(t % 3600 / 60)).padStart(2, '0') + 'm' : Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
 const hhmm = d => { const off = S.weather?.utcOffset; const x = off != null ? new Date(d.getTime() + off * 1000) : d; return off != null ? String(x.getUTCHours()).padStart(2, '0') + ':' + String(x.getUTCMinutes()).padStart(2, '0') : x.toTimeString().slice(0, 5); };
 const rel = f => relative(f, S.proj);
+const dLon = (a, b) => Math.abs(((a - b) % 360 + 540) % 360 - 180); // across the date line too
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ---------------- boot ---------------- */
@@ -46,12 +50,26 @@ addEventListener('resize', resize); resize();
 
 /* ---------------- log & badges ---------------- */
 const LOGKEY = 'squawk.log.v2';
-const newLog = () => ({ types: {}, airlines: {}, badges: {}, tracked: 0, since: Date.now(), xp: 0, seen: 0, seenTypes: {}, days: [], day: null });
+// recent/seenHex remember which airframes were caught or seen in the last 12 h, so a reload doesn't count them twice
+const newLog = () => ({ types: {}, airlines: {}, badges: {}, tracked: 0, since: Date.now(), xp: 0, seen: 0, seenTypes: {}, days: [], day: null, recent: {}, seenHex: {} });
 const logLive = Object.assign(newLog(), store.get(LOGKEY, {}));
 const logSim = newLog();
 const theLog = () => (S.mode === 'live' ? logLive : logSim);
+const AGAIN = 12 * 3600e3;
 let saveT = null;
-const saveLog = () => { clearTimeout(saveT); saveT = setTimeout(() => store.set(LOGKEY, logLive), 1500); };
+function writeLog() {
+  clearTimeout(saveT); saveT = null; const t = Date.now();
+  for (const m of [logLive.recent, logLive.seenHex]) if (m) for (const k in m) if (t - m[k] > AGAIN) delete m[k];
+  store.set(LOGKEY, logLive);
+}
+const saveLog = () => { if (!saveT) saveT = setTimeout(writeLog, 1500); };
+addEventListener('pagehide', () => { if (saveT) writeLog(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && saveT) writeLog(); });
+// another tab saved its log: take that copy, so this tab's next save doesn't wipe the other's progress
+addEventListener('storage', e => {
+  if (e.key !== LOGKEY || !e.newValue) return;
+  try { const v = JSON.parse(e.newValue); for (const k in logLive) delete logLive[k]; Object.assign(logLive, newLog(), v); paintLevel(); } catch (x) { /* ignore a bad copy */ }
+});
 const ICON_STAR = '<svg viewBox="0 0 24 24"><path d="M12 2l2.9 6.3 6.9.7-5.2 4.6 1.5 6.8L12 17l-6.1 3.4 1.5-6.8L2.2 9l6.9-.7z"/></svg>';
 const BADGES = [
   { id: 'first', name: 'First contact', desc: 'Track your first aircraft' },
@@ -74,7 +92,7 @@ const BADGES = [
 function award(id) {
   const lg = theLog(); if (lg.badges[id]) return; lg.badges[id] = Date.now(); if (lg === logLive) saveLog();
   gain(XP.badge);
-  if (S.booting || S.quiet) return;
+  if (S.booting || S.quiet || lg !== logLive) return;
   const b = BADGES.find(x => x.id === id); const el = $('badgeToast');
   el.innerHTML = `<span class="star">${ICON_STAR}</span><span>Badge unlocked: <b>${esc(b.name)}</b></span>`; el.hidden = false;
   clearTimeout(award.t); award.t = setTimeout(() => { el.hidden = true; }, 4200);
@@ -109,7 +127,7 @@ function gain(n) {
   const lg = theLog(), before = levelOf(lg.xp || 0).n; lg.xp = (lg.xp || 0) + n;
   if (lg === logLive) saveLog();
   paintLevel();
-  if (S.booting || S.quiet) return;
+  if (S.booting || S.quiet || lg !== logLive) return; // simulated traffic earns nothing you'd notice
   floatXP(n);
   const L = levelOf(lg.xp);
   if (L.n > before) { flash(`Level ${L.n}: <b>${esc(L.name)}</b>`); pushEvent('badge', `You reached level ${L.n}, ${L.name}`); confetti(); }
@@ -128,11 +146,11 @@ function mission(e) {
   const d = dayRec();
   for (const m of missionsFor(d.date)) if (!d.done[m.id] && m.check(d, e)) {
     d.done[m.id] = Date.now(); gain(XP.mission);
-    if (!S.booting && !S.quiet) { flash(`Mission done: <b>${esc(m.text)}</b>`); pushEvent('badge', `Daily mission done: ${m.text}`); }
+    if (!S.booting && !S.quiet && S.mode === 'live') { flash(`Mission done: <b>${esc(m.text)}</b>`); pushEvent('badge', `Daily mission done: ${m.text}`); }
   }
 }
 function paintLevel() {
-  const L = levelOf(theLog().xp || 0), el = $('lvlChip');
+  const L = levelOf(logLive.xp || 0), el = $('lvlChip');
   el.textContent = 'Lv ' + L.n; el.style.setProperty('--p', Math.round(L.pct * 100) + '%'); el.title = `${L.name} · ${L.xp} XP`;
 }
 function floatXP(n) {
@@ -148,9 +166,11 @@ function confetti() {
   document.body.appendChild(box); setTimeout(() => box.remove(), 2200);
 }
 /** "I saw it!": a real sighting, worth more than tracking it on screen. */
+const seenBefore = f => f.seen || Date.now() - ((theLog().seenHex || {})[f.hex || f.id] || 0) < AGAIN;
 function sawIt(f) {
-  if (!f || f.seen) return;
-  const lg = theLog(); f.seen = true; lg.seen = (lg.seen || 0) + 1; lg.seenTypes = lg.seenTypes || {};
+  if (!f || seenBefore(f)) return;
+  const lg = theLog(); f.seen = true; (lg.seenHex = lg.seenHex || {})[f.hex || f.id] = Date.now();
+  lg.seen = (lg.seen || 0) + 1; lg.seenTypes = lg.seenTypes || {};
   const key = f.type || '?', first = !lg.seenTypes[key]; lg.seenTypes[key] = (lg.seenTypes[key] || 0) + 1;
   gain(XP.seen + (first && f.type ? XP.seenType : 0)); mission({ seen: true }); award('eyes'); confetti();
   pushEvent('badge', `You saw ${f.callsign} with your own eyes${first && f.type ? `, your first ${D.typeName(f)}` : ''}`);
@@ -171,7 +191,7 @@ function coachPick() {
   return best;
 }
 function coachStart() {
-  if (coach.on || coach.later || store.get('squawk.coach', false) || S.mode === 'boot' || document.body.classList.contains('photo')) return;
+  if (coach.on || coach.later || store.get('squawk.coach', false) || S.mode !== 'live' || document.body.classList.contains('photo')) return;
   const f = coachPick(); if (!f) return;
   coach.on = true; coach.id = f.id; $('coach').hidden = false; coachShow(f, true);
 }
@@ -183,12 +203,13 @@ function coachShow(f, fresh) {
 }
 function coachTick() {
   if (!coach.on) { if (loaderDone && performance.now() - bootT > 14000) coachStart(); return; }
+  if (S.mode !== 'live') { coach.on = false; $('coach').hidden = true; return; } // the feed dropped to simulated traffic: nothing real to look for
   const f = S.flights.get(coach.id), r = f && rel(f);
   if (!f || r.d > 70 || r.elev < 3) { coach.skip.add(coach.id); const n = coachPick(); if (n) { coach.id = n.id; coachShow(n, true); } else coachEnd(false); return; }
   coachShow(f, false);
 }
 function coachEnd(done) { coach.on = false; $('coach').hidden = true; if (done) store.set('squawk.coach', true); else coach.later = true; }
-$('coachSaw').onclick = () => { sawIt(S.flights.get(coach.id)); coachEnd(true); flash('<b>First sighting!</b> That plane is now in your log.'); };
+$('coachSaw').onclick = () => { const f = S.flights.get(coach.id); sawIt(f); coachEnd(true); flash(f ? '<b>First sighting!</b> That plane is now in your log.' : '<b>Nice spotting!</b> Tap a plane and press "I saw it!" to log the next one.'); };
 $('coachNext').onclick = () => { coach.skip.add(coach.id); const n = coachPick(); if (n) { coach.id = n.id; coachShow(n, true); } else coachEnd(false); };
 $('coachLater').onclick = () => coachEnd(false);
 
@@ -203,7 +224,7 @@ function pushEvent(k, text) {
 // Recomputed every 2 s from the live positions. Times are seconds from S.pred.at.
 function predictAll() {
   const o = S.proj, now = Date.now(), near = [];
-  for (const f of S.flights.values()) if (Math.abs(f.lat - o.lat0) < 4 && Math.abs(f.lon - o.lon0) < 6 && haversine(o.lat0, o.lon0, f.lat, f.lon) < 450) near.push(f);
+  for (const f of S.flights.values()) if (Math.abs(f.lat - o.lat0) < 4 && dLon(f.lon, o.lon0) < 6 && haversine(o.lat0, o.lon0, f.lat, f.lon) < 450) near.push(f);
   const over = [];
   for (const f of near) {
     f.ctr = f.alt > 5 ? contrailAt(f.alt, S.weather?.levels)?.state : null;
@@ -242,7 +263,7 @@ function chime() {
   } catch (e) { /* no audio */ }
 }
 function ping(key, head, text, id) {
-  if (S.alerted.has(key) || S.mode === 'boot') return;
+  if (S.alerted.has(key) || S.mode !== 'live') return; // never send anyone outside to look for a simulated plane
   S.alerted.add(key);
   const el = $('ping'); $('pingHead').textContent = head; $('pingText').textContent = text; el.hidden = false; el.dataset.id = id || '';
   clearTimeout(ping.t); ping.t = setTimeout(() => { el.hidden = true; }, 9000);
@@ -291,7 +312,11 @@ function addFlight(f) {
 // which 3D model and tail colour to draw
 function dress(f) { f.model = modelOf(f.type, f.cat); f.livery = LIVERY[D.airlineCode(f.callsign)] || null; }
 function catchFlight(f) {
-  f.caught = true; S.quiet = f.quiet; logCatch(f); S.quiet = false;
+  f.caught = true;
+  const lg = theLog(), k = f.hex || f.id, now = Date.now(); lg.recent = lg.recent || {};
+  if (now - (lg.recent[k] || 0) < AGAIN) return; // already caught in the last 12 h (a reload, or it flew out and back)
+  lg.recent[k] = now;
+  S.quiet = f.quiet; try { logCatch(f); } finally { S.quiet = false; }
   if (!f.quiet && D.HEAVY.has(f.type)) pushEvent('heavy', `${f.callsign}, a ${D.typeName(f)}, is in range at ${fmtAlt(f.alt)}`);
 }
 function emergency(f) { if (rel(f).d > IN_RANGE * 4) return; pushEvent('emg', `${f.callsign} is squawking ${f.squawk}`); if (f.squawk === '7700') award('mayday'); }
@@ -299,17 +324,23 @@ function removeFlight(id) { S.flights.delete(id); if (S.selId === id) select(nul
 function clearFlights() { S.flights.clear(); world.resetAircraft(); select(null); }
 
 const staleAfter = () => Math.max(40, (S.region?.ms || POLL_MS) / 1000 * 2.5);
+// feed values are checked, not trusted: a bad number would put NaN into the camera, a non-string would throw mid-batch
+const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const str = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : typeof v === 'number' && Number.isFinite(v) ? String(v).slice(0, n) : '');
 function ingest(list) {
   const now = performance.now() / 1000;
+  if (list.length > 20000) list = list.slice(0, 20000);
   for (const a of list) {
-    if (a.lat == null || a.lon == null || a.alt_baro === 'ground') continue;
-    const ft = typeof a.alt_baro === 'number' ? a.alt_baro : (typeof a.alt_geom === 'number' ? a.alt_geom : null);
-    if (ft == null) continue;
-    const id = 'h' + a.hex, cs = (a.flight || '').trim();
-    const d = { hex: a.hex, lat: a.lat, lon: a.lon, alt: Math.max(0, ft * 0.0003048), spd: (a.gs || 0) * 0.000514444,
-      vr: (a.baro_rate ?? a.geom_rate ?? 0) * 0.00000508, squawk: a.squawk || '', type: a.t || '', desc: a.desc || '', reg: a.r || '',
-      cat: a.category || '', callsign: cs || a.r || String(a.hex).toUpperCase(), lastFix: now, kind: 'live', mil: !!(a.dbFlags & 1), odd: !!(a.dbFlags & 2) };
-    const trk = a.track ?? a.true_heading ?? a.mag_heading;
+    if (!a || typeof a !== 'object' || a.alt_baro === 'ground') continue;
+    const lat = num(a.lat), lon = num(a.lon), hex = str(a.hex, 12).toLowerCase();
+    if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180 || !hex) continue;
+    const ft = num(a.alt_baro) ?? num(a.alt_geom);
+    if (ft == null || ft > 200000) continue;
+    const id = 'h' + hex, cs = str(a.flight, 10), reg = str(a.r, 12);
+    const d = { hex, lat, lon, alt: Math.max(0, ft * 0.0003048), spd: clamp(num(a.gs) ?? 0, 0, 2500) * 0.000514444,
+      vr: clamp(num(a.baro_rate) ?? num(a.geom_rate) ?? 0, -20000, 20000) * 0.00000508, squawk: str(a.squawk, 4), type: str(a.t, 6).toUpperCase(), desc: str(a.desc, 60), reg,
+      cat: str(a.category, 2), callsign: cs || reg || hex.toUpperCase(), lastFix: now, kind: 'live', mil: !!(a.dbFlags & 1), odd: !!(a.dbFlags & 2) };
+    const trk = num(a.track) ?? num(a.true_heading) ?? num(a.mag_heading);
     const f = S.flights.get(id);
     if (!f) addFlight({ id, trk: trk ?? 0, turn: 0, ...d });
     else { const was = f.emg, ty = f.type; Object.assign(f, d); if (trk != null) f.trk = trk; f.emg = D.isEmergency(f); if (f.emg && !was) emergency(f); if (ty !== f.type) dress(f); }
@@ -336,7 +367,8 @@ function simStep(dt) {
 let feedGen = 0, pollT = null, fails = 0, inflight = false, lastReq = 0;
 function region() {
   const f = world.focus(), vr = world.viewRadius(), home = S.proj;
-  if (haversine(home.lat0, home.lon0, f.lat, f.lon) < 120 && vr < 260) return { lat: home.lat0, lon: home.lon0, nm: FEED_NM, ms: POLL_MS, home: true };
+  // until the feed works, and in ground view (you stand at home), just ask for home: small, quick and what matters first
+  if (S.mode !== 'live' || !loaderDone || S.view === 'ground' || (haversine(home.lat0, home.lon0, f.lat, f.lon) < 120 && vr < 260)) return { lat: home.lat0, lon: home.lon0, nm: FEED_NM, ms: POLL_MS, home: true };
   const nm = [100, 250, 500, 1000, 2000, 3500].find(n => n * 1.852 >= vr) || 3500;
   return { lat: +f.lat.toFixed(2), lon: +f.lon.toFixed(2), nm, ms: nm <= 250 ? 5000 : nm <= 1000 ? 10000 : 30000 };
 }
@@ -345,7 +377,7 @@ function setFeed(mode, label) {
   $('feedChip').dataset.mode = mode; $('feedLabel').textContent = label;
   const every = S.region ? S.region.ms / 1000 : 5;
   $('feedNote').textContent = mode === 'live' ? `Receiving live positions from ${S.provider}, refreshed every ${every} seconds. ${S.region && !S.region.home ? `Showing up to ${S.region.nm.toLocaleString('en')} nm around the spot you're looking at.` : ''}`
-    : mode === 'sim' ? 'The flight-tracking networks block direct requests from this site, so you are watching realistic simulated traffic. Host Squawk on Vercel or Netlify (the included config relays the feed), or paste a relay URL below. The README has the two-minute setup.'
+    : mode === 'sim' ? 'Squawk can\'t reach the flight-tracking networks right now, so you are watching realistic simulated traffic. It tries again every minute. If it never connects, the networks may be blocking this site: host Squawk on Vercel or Netlify (the included config relays the feed), or paste a relay URL below. The README has the two-minute setup.'
     : 'Connecting to the flight-tracking networks.';
 }
 function startSim() {
@@ -357,6 +389,7 @@ function startSim() {
 async function poll(gen) {
   if (gen !== feedGen) return;
   clearTimeout(pollT); inflight = true; lastReq = performance.now();
+  if (S.mode === 'sim') D.resetFeedSources(); // give every source a fresh chance on each retry
   const reg = S.region = region();
   let wait = reg.ms;
   try {
@@ -367,9 +400,9 @@ async function poll(gen) {
     S.provider = provider; fails = 0; setFeed('live', 'Live · ' + provider);
   } catch (e) {
     if (gen !== feedGen) return;
-    if (e.rate && S.mode === 'live') wait = 15000;
-    else { fails++; if (S.mode !== 'sim' && (S.mode === 'boot' || fails >= 3)) startSim(); }
-    if (S.mode === 'sim') wait = 60000;
+    // rate limited: back off (never faster than the normal refresh), and don't count it as the feed failing
+    if (e.rate) { wait = Math.max(reg.ms * 2, 20000); if (S.mode === 'boot') startSim(); }
+    else { fails++; if (S.mode !== 'sim' && (S.mode === 'boot' || fails >= 3)) startSim(); if (S.mode === 'sim') wait = 60000; }
   } finally {
     if (gen === feedGen) { inflight = false; S.feedResolved = true; pollT = setTimeout(() => poll(gen), wait); }
   }
@@ -377,7 +410,7 @@ async function poll(gen) {
 function restartFeed() { feedGen++; clearTimeout(pollT); inflight = false; S.mode = 'boot'; S.region = null; S.feedResolved = false; setFeed('boot', 'Connecting'); poll(feedGen); }
 // Called once a second: when the view has moved to a new area, ask for it now instead of waiting for the next poll.
 function followView() {
-  if (S.mode !== 'live' || inflight || world.fly || performance.now() - lastReq < 2500) return;
+  if (S.mode !== 'live' || !loaderDone || inflight || world.fly || performance.now() - lastReq < 2500) return;
   if (regionMoved(S.region, region())) poll(feedGen);
 }
 
@@ -400,7 +433,7 @@ function setPlace(p, boot) {
 async function loadWeather() {
   const at = S.proj;
   try { const w = await D.fetchWeather(at.lat0, at.lon0); if (at !== S.proj) return; S.weather = w; world.setWeather(w); }
-  catch (e) { world.setWeather(null); }
+  catch (e) { if (at !== S.proj) return; world.setWeather(null); }
   if (S.tab === 'weather') renderPanel(true);
   updateSun();
 }
@@ -572,8 +605,8 @@ function updateCard() {
   $('cReg').textContent = f.reg || '—'; $('cPhase').textContent = phase(f);
   const fam = familyOf(f.type), facts = plainFacts(f, r);
   $('cFact').hidden = !fam && !facts.length; $('cFact').innerHTML = (fam ? `<b>${esc(fam.name)}.</b> ${esc(fam.fact)} ` : '') + esc(facts.join(' '));
-  const canSee = r.d < 120 && r.elev > 1;
-  $('cSaw').hidden = !canSee && !f.seen; $('cSaw').disabled = !!f.seen; $('cSaw').lastChild.textContent = f.seen ? 'In your log as seen' : 'I saw it!';
+  const canSee = S.mode === 'live' && r.d < 120 && r.elev > 1, seen = S.mode === 'live' && seenBefore(f);
+  $('cSaw').hidden = !canSee && !seen; $('cSaw').disabled = seen; $('cSaw').lastChild.textContent = seen ? 'In your log as seen' : 'I saw it!';
   const rr = 52 * (1 - clamp(r.elev, 0, 90) / 90), x = 60 + Math.sin(r.brg * Math.PI / 180) * rr, y = 60 - Math.cos(r.brg * Math.PI / 180) * rr;
   $('dLine').setAttribute('x2', x.toFixed(1)); $('dLine').setAttribute('y2', y.toFixed(1)); $('dDot').setAttribute('cx', x.toFixed(1)); $('dDot').setAttribute('cy', y.toFixed(1));
 }
@@ -615,8 +648,13 @@ function togglePop(id, btn, show) {
 $('placeBtn').onclick = e => { e.stopPropagation(); togglePop('placePop', 'placeBtn'); if (!$('placePop').hidden) $('searchQ').focus(); };
 $('layersBtn').onclick = e => { e.stopPropagation(); togglePop('layersPop', 'layersBtn'); };
 $('feedChip').onclick = e => { e.stopPropagation(); togglePop('layersPop', 'layersBtn', true); };
-$('relayQ').value = settings.relay;
-$('relayForm').onsubmit = e => { e.preventDefault(); settings.relay = $('relayQ').value.trim(); saveSettings(); D.feedConfig.relayUrl = settings.relay; D.resetFeedSources(); restartFeed(); };
+$('relayQ').value = D.feedConfig.relayUrl;
+$('relayQ').oninput = () => $('relayQ').setCustomValidity('');
+$('relayForm').onsubmit = e => {
+  e.preventDefault(); const v = $('relayQ').value.trim();
+  if (v && !relayOK(v)) { $('relayQ').setCustomValidity('Use a full https:// address'); $('relayQ').reportValidity(); return; }
+  settings.relay = v; saveSettings(); D.feedConfig.relayUrl = v; D.resetFeedSources(); restartFeed();
+};
 document.addEventListener('pointerdown', e => {
   for (const [o, b] of [['placePop', 'placeBtn'], ['layersPop', 'layersBtn']]) if (!$(o).hidden && !$(o).contains(e.target) && !$(b).contains(e.target) && !$('feedChip').contains(e.target)) togglePop(o, b, false);
 });
@@ -845,7 +883,7 @@ let histT = 0;
 function tickHistory() {
   const now = Date.now(); if (now - histT < 10000) return; histT = now;
   for (const f of S.flights.values()) {
-    if (f.id !== S.selId && (Math.abs(f.lat - S.proj.lat0) > 6 || Math.abs(f.lon - S.proj.lon0) > 9)) continue;
+    if (f.id !== S.selId && (Math.abs(f.lat - S.proj.lat0) > 6 || dLon(f.lon, S.proj.lon0) > 9)) continue;
     (f.hist || (f.hist = [])).push([now, f.alt]); if (f.hist.length > 60) f.hist.shift();
   }
 }
@@ -975,7 +1013,7 @@ function updateHUD() {
   let nf = null, nr = null; for (const { f, r } of near) if (!nr || r.slant < nr.slant) { nf = f; nr = r; }
   $('rNear').textContent = (nr.slant < 10 ? nr.slant.toFixed(1) : Math.round(nr.slant)) + ' km'; $('rNearS').textContent = `${nf.callsign} · look ${P16[pt16(nr.brg)]}`;
   const over = near.filter(o => o.r.d < 5 && o.f.alt < 6).sort((a, b) => a.r.d - b.r.d)[0];
-  if (over) {
+  if (over && S.mode === 'live') {
     $('toast').hidden = false;
     $('toastText').textContent = `${over.f.callsign} is ${over.r.d.toFixed(1)} km away at ${fmtAlt(over.f.alt)}, ${Math.round(over.r.elev)}° up to the ${P16L[pt16(over.r.brg)]}.`;
     if (!over.f.seenOver) { over.f.seenOver = true; pushEvent('over', `${over.f.callsign} passed near you at ${fmtAlt(over.f.alt)}`); }

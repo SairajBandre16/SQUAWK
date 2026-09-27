@@ -4,7 +4,9 @@
     python3 serve.py            # http://localhost:8000
     python3 serve.py 9000       # another port
 """
-import http.server, socketserver, sys, urllib.request, urllib.error
+import http.server, os, socketserver, sys, urllib.parse, urllib.request, urllib.error
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
 
 RELAYS = {
     '/api/adsb/': 'https://api.adsb.lol/v2/',
@@ -13,11 +15,25 @@ RELAYS = {
 }
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        # serve this folder wherever the script is started from
+        super().__init__(*args, directory=ROOT, **kwargs)
+
     def do_GET(self):
         for prefix, upstream in RELAYS.items():
             if self.path.startswith(prefix):
                 return self.relay(upstream + self.path[len(prefix):])
         return super().do_GET()
+
+    def send_head(self):
+        # keep .git and other dotfiles private
+        if any(p.startswith('.') for p in urllib.parse.unquote(self.path.split('?')[0]).replace('\\', '/').split('/') if p):
+            self.send_error(404)
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        self.send_error(404)
 
     def relay(self, url):
         try:
@@ -37,12 +53,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         # always revalidate, so edited modules are picked up on a plain reload
-        if not self.path.startswith('/api/'):
+        if not getattr(self, 'path', '').startswith('/api/'):
             self.send_header('Cache-Control', 'no-cache')
         super().end_headers()
 
     def log_message(self, fmt, *args):
-        if not self.path.startswith('/api/'):
+        if not getattr(self, 'path', '').startswith('/api/'):
             super().log_message(fmt, *args)
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
