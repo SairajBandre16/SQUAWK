@@ -51,6 +51,7 @@ js/predict.js     closestApproach(), transits() with the ground centreline, cont
 js/sats.js        Sats class: CelesTrak elements (cached 6 h in localStorage), SGP4 positions, sunlit test, visible-pass search.
 js/models.js      Ten low-poly model families (body + tail fin), modelOf(type, category), LIVERY tail colours by airline.
 js/spotter.js     FAMILIES for the collection, levels and XP, daily missions, streak, plainFacts(), silhouettes.
+js/sense.js       Phone heading and tilt (DeviceOrientation, iOS webkitCompassHeading), screen projection for the sky camera, rear-camera stream.
 js/geo.js         Local projection (Proj), earth-centred frame helpers, haversine/bearing, relative(), sun position, compass helpers.
 ```
 
@@ -84,6 +85,8 @@ js/geo.js         Local projection (Proj), earth-centred frame helpers, haversin
 - Alerts: `ping()` always shows the dark toast and logs an event; the chime, vibration and system notification only happen when `settings.alerts` is on.
 - Transit lines are drawn by `world.setTransitLines()` in the home group. The contrail forecast needs the pressure-level fields in `S.weather.levels` (`fetchWeather()` in `data.js`).
 - Satellites: `startSats()` loads after the intro; `tickSats()` refreshes positions each second and passes every 30 min; `world.syncSats()` extrapolates between fixes. Satellite coordinates are converted from satellite.js ECF (x lon 0, y lon 90E, z north) to the globe frame (x = ecf.y, y = ecf.z, z = ecf.x).
+- Location: `settings.placeSrc` is `gps`, `pick` or `''`. Until it's set, boot starts at `tzGuess()` and `bootLocate()` shows the `#welcome` card after the loader. With geolocation already granted and a home that isn't a picked place, boot moves home quietly when you're more than 3 km away.
+- Compass and sky camera: `lookText()`/`paintCompass()` drive the card's compass (heading-up when `headingNow()` has a fresh north-tied heading). `openAR()`/`updateAR()` run the full-screen camera; while `ar.on`, `tick()` skips drawing the 3D world. Tags use `rel(f)` from home, so they only line up when the viewer stands at home. `sense.nudge` (saved as `settings.nudge`) is the viewer's drag correction. Both only show on `(pointer: coarse)` devices.
 - Hobby layer: `gain(xp)`, `mission(event)`, `dayRec()` and `sawIt(f)` live in `main.js`; the numbers and definitions are in `spotter.js`. The log (`squawk.log.v2`) now also has `xp`, `seen`, `seenTypes`, `days` and `day`. The first-sighting guide (`coach*`) runs once per browser (`squawk.coach`), and only when a plane is 8° to 75° up within 50 km.
 
 ### Rendering (`js/world.js`, `js/globe.js`)

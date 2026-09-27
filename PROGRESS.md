@@ -49,6 +49,11 @@ _Last updated: 27 Sept 2026_
   - [x] date-line fix, aircraft family fixes, and a hardened `serve.py`
 - [x] The rest is recorded in [BUGS.md](BUGS.md)
 
+### Location, compass and sky camera (27 Sept 2026)
+- [x] First visit asks for your location (after a time-zone guess instead of always Dublin); returning visitors with location allowed follow where they are
+- [x] The card's sky dial is now a compass: on phones it turns with you and says "Turn right 40°, look 26° up"
+- [x] Sky camera: point the phone at the sky to name the planes, tap to track, drag to fix the compass
+
 ## Next up
 
 The first four are the high-priority items from [BUGS.md](BUGS.md):

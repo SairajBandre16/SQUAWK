@@ -7,14 +7,21 @@ import { closestApproach, transits, contrailAt, pressureAt } from './predict.js'
 import { Sats } from './sats.js';
 import { modelOf, LIVERY } from './models.js';
 import { FAMILIES, familyOf, levelOf, XP, missionsFor, today, streak, plainFacts, silhouette } from './spotter.js';
+import { sense, startSense, senseNeedsTap, headingNow, axes, toScreen, startCam, stopCam, focal, wrap } from './sense.js';
 
 const $ = id => document.getElementById(id);
 const IN_RANGE = 185, FEED_NM = 100, POLL_MS = 5000;
+const coarse = matchMedia('(pointer: coarse)').matches; // a phone or tablet: offer the compass and the sky camera
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
 };
-const settings = Object.assign({ place: D.PLACES[0], style: 'satellite', clouds: true, labels: 'nearby', names: true, sats: true, radar: false, alerts: false, relay: '' }, store.get('squawk.settings', {}));
+const stored = store.get('squawk.settings', {});
+// placeSrc: 'gps' when home came from your location, 'pick' when you chose it, '' until then
+const settings = Object.assign({ place: D.PLACES[0], placeSrc: '', style: 'satellite', clouds: true, labels: 'nearby', names: true, sats: true, radar: false, alerts: false, relay: '', nudge: 0 }, stored);
+if (!settings.place || !Number.isFinite(settings.place.lat) || !Number.isFinite(settings.place.lon) || typeof settings.place.name !== 'string') settings.place = D.PLACES[0];
+if (!settings.placeSrc && stored.place && stored.place.name !== D.PLACES[0].name) settings.placeSrc = 'pick'; // chosen before this setting existed
+sense.nudge = Number.isFinite(settings.nudge) ? settings.nudge : 0;
 // a relay must be a full https URL (plain http only while Squawk itself runs on http, e.g. localhost)
 const relayOK = s => { try { const u = new URL(s); return u.protocol === 'https:' || (u.protocol === 'http:' && location.protocol === 'http:'); } catch (e) { return false; } };
 if (settings.relay && !relayOK(settings.relay)) settings.relay = '';
@@ -191,7 +198,7 @@ function coachPick() {
   return best;
 }
 function coachStart() {
-  if (coach.on || coach.later || store.get('squawk.coach', false) || S.mode !== 'live' || document.body.classList.contains('photo')) return;
+  if (coach.on || coach.later || !$('welcome').hidden || store.get('squawk.coach', false) || S.mode !== 'live' || document.body.classList.contains('photo')) return;
   const f = coachPick(); if (!f) return;
   coach.on = true; coach.id = f.id; $('coach').hidden = false; coachShow(f, true);
 }
@@ -417,8 +424,8 @@ function followView() {
 /* ---------------- place ---------------- */
 // "Home" is where you stand: the pin, range rings, ground view, weather, log and badges all belong to it.
 // On the first load the camera starts in space above home; later moves fly there.
-function setPlace(p, boot) {
-  settings.place = { name: p.name, lat: p.lat, lon: p.lon }; saveSettings();
+function setPlace(p, boot, src) {
+  settings.place = { name: p.name, lat: p.lat, lon: p.lon }; if (src) { settings.placeSrc = src; $('welcome').hidden = true; } saveSettings();
   S.proj = new Proj(p.lat, p.lon); $('placeName').textContent = p.name;
   const back = 'Back to ' + p.name.split(',')[0]; $('recenterBtn').dataset.tip = back; $('recenterBtn').setAttribute('aria-label', back + ' (H)');
   world.setHome(p.lat, p.lon); world.setAirports(D.AIRPORTS, S.proj);
@@ -589,9 +596,8 @@ function updateCard() {
     const pts = h.map(x => X(x[0]) + ',' + Y(x[1])).join(' ');
     $('cProfL').setAttribute('points', pts); $('cProfA').setAttribute('points', `0,60 ${pts} 300,60`); $('cProfT').textContent = dur((t1 - t0) / 1000);
   }
-  const p = pt16(r.brg);
   const home = settings.place.name.split(',')[0];
-  $('cLook').textContent = r.d > 600 ? `Too far to see from ${home}` : r.elev < 0.5 ? `${cap(P16L[p])}, below your horizon` : `${cap(P16L[p])}, ${Math.round(r.elev)}° up`;
+  lookText(r, home);
   $('cDist').textContent = `${r.d < 10 ? r.d.toFixed(1) : Math.round(r.d).toLocaleString('en')} km ${r.d > 600 ? 'from ' + home : 'away'} · bearing ${String(Math.round(r.brg)).padStart(3, '0')}°`;
   // what's coming: its closest pass, and any sun or moon crossing
   const age = S.pred.at ? (Date.now() - S.pred.at) / 1000 : 0, nx = f.next, tr = S.pred.tr.find(x => x.f === f);
@@ -607,8 +613,39 @@ function updateCard() {
   $('cFact').hidden = !fam && !facts.length; $('cFact').innerHTML = (fam ? `<b>${esc(fam.name)}.</b> ${esc(fam.fact)} ` : '') + esc(facts.join(' '));
   const canSee = S.mode === 'live' && r.d < 120 && r.elev > 1, seen = S.mode === 'live' && seenBefore(f);
   $('cSaw').hidden = !canSee && !seen; $('cSaw').disabled = seen; $('cSaw').lastChild.textContent = seen ? 'In your log as seen' : 'I saw it!';
-  const rr = 52 * (1 - clamp(r.elev, 0, 90) / 90), x = 60 + Math.sin(r.brg * Math.PI / 180) * rr, y = 60 - Math.cos(r.brg * Math.PI / 180) * rr;
-  $('dLine').setAttribute('x2', x.toFixed(1)); $('dLine').setAttribute('y2', y.toFixed(1)); $('dDot').setAttribute('cx', x.toFixed(1)); $('dDot').setAttribute('cy', y.toFixed(1));
+  paintCompass(r);
+}
+// "Where to look" in plain words: which way to turn (or face, without a phone compass), then how high
+function lookText(r, home) {
+  const h = headingNow(), fists = Math.max(1, Math.round(r.elev / 10));
+  let look, up;
+  if (r.d > 600) { look = 'Too far to see'; up = `It's beyond the horizon from ${home}`; }
+  else {
+    if (h == null) look = `Face ${P16L[pt16(r.brg)]}`;
+    else { const d = wrap(r.brg - h), a = Math.abs(d); look = a < 12 ? 'Straight ahead' : a > 160 ? 'Turn around' : `Turn ${d > 0 ? 'right' : 'left'} ${Math.round(a)}°`; }
+    up = r.elev < 0.5 ? 'It\'s below your horizon for now' : r.elev > 75 ? 'Look almost straight up' : `Look ${Math.round(r.elev)}° up, about ${fists} fist${fists > 1 ? 's' : ''} above the horizon`;
+  }
+  $('cLook').textContent = look; $('cUp').textContent = up;
+  const tb = coarse && r.d <= 600; $('cLookB').hidden = !tb; $('cCompass').hidden = !tb || sense.live;
+}
+// the compass turns with the phone, so the arrow always points at the plane; without a compass, north is up
+let cmpH = NaN;
+const roseLetters = [];
+{
+  let t = ''; for (let i = 0; i < 360; i += 15) { const a = i * Math.PI / 180, r1 = i % 90 ? 48 : 44, sn = Math.sin(a), cs = Math.cos(a); t += `M${(60 + sn * r1).toFixed(1)} ${(60 - cs * r1).toFixed(1)}L${(60 + sn * 52).toFixed(1)} ${(60 - cs * 52).toFixed(1)}`; }
+  $('dRose').innerHTML = '<circle cx="60" cy="60" r="54" class="ring"/>' + `<path class="tick" d="${t}"/>` +
+    ['N', 'E', 'S', 'W'].map((l, i) => `<text class="cl${i ? '' : ' n'}" x="${60 + [0, 1, 0, -1][i] * 35}" y="${60 - [1, 0, -1, 0][i] * 35}" text-anchor="middle" dominant-baseline="central">${l}</text>`).join('');
+  roseLetters.push(...$('dRose').querySelectorAll('text'));
+}
+function paintCompass(r) {
+  const h = headingNow(), hh = h ?? 0;
+  if (Math.abs(hh - cmpH) > 0.3 || Number.isNaN(cmpH)) {
+    cmpH = hh; $('dRose').setAttribute('transform', `rotate(${(-hh).toFixed(1)} 60 60)`);
+    for (const t of roseLetters) t.setAttribute('transform', `rotate(${hh.toFixed(1)} ${t.getAttribute('x')} ${t.getAttribute('y')})`);
+  }
+  $('dArrow').setAttribute('transform', `rotate(${(r.brg - hh).toFixed(1)} 60 60)`);
+  $('dYou').classList.toggle('off', h == null);
+  $('dElev').textContent = r.elev < 0.5 ? '—' : Math.round(r.elev) + '°';
 }
 function setFollow(on) {
   S.follow = on && !!S.selId; $('cFollow').setAttribute('aria-pressed', String(S.follow)); $('cFollow').textContent = S.follow ? 'Following' : 'Follow';
@@ -620,6 +657,130 @@ $('lvlChip').onclick = e => { e.stopPropagation(); setTab('log'); };
 $('cFollow').onclick = () => setFollow(!S.follow);
 $('cGround').onclick = () => { const f = S.flights.get(S.selId); if (!f) return; setFollow(false); setView('ground'); world.lookAtRel(rel(f)); };
 world.onUnfollow = () => setFollow(false);
+
+$('cCompass').onclick = async () => { if (!await startSense()) flash(sense.err === 'denied' ? 'Motion access was refused. Allow it in your browser settings to use the compass.' : 'This device has no compass.'); };
+$('cAR').onclick = () => openAR(S.selId);
+
+/* ---------------- sky camera ---------------- */
+// Point the phone at the sky: the camera fills the screen and every aircraft in range gets a tag where it really is.
+// Tags use true angles from home, so they line up when you stand at home. Drag sideways to fix a compass that's off.
+const ar = { on: false, cam: null, pick: null, aim: null, pool: [], drag: null, infoT: 0, infoId: undefined, err: '' };
+const AR_MAX = 30, arPt = {};
+async function openAR(id) {
+  if (ar.on) return;
+  const sP = startSense(), cP = startCam($('arVid')).catch(() => null); // both straight from the tap, as iOS wants
+  ar.on = true; ar.pick = id && S.flights.has(id) ? id : null; ar.aim = null; ar.infoId = undefined; ar.err = '';
+  $('ar').hidden = false; $('ar').classList.remove('nocam'); $('arMsg').textContent = 'Starting the camera…';
+  togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false);
+  const [okS, cam] = await Promise.all([sP, cP]);
+  if (!ar.on) { stopCam($('arVid'), cam); return; }
+  ar.cam = cam; $('ar').classList.toggle('nocam', !cam);
+  if (!okS) ar.err = sense.err === 'denied' ? 'Motion access was refused, so Squawk can\'t tell where your phone points. Allow it in your browser settings and try again.' : 'This device has no motion sensor, so the sky camera can\'t follow it.';
+  else if (!cam) { ar.err = 'No camera, so here are the tags on their own. They still point the right way.'; setTimeout(() => { if (ar.err.startsWith('No camera')) ar.err = ''; }, 6000); }
+}
+function closeAR() {
+  if (!ar.on) return;
+  ar.on = false; $('ar').hidden = true; stopCam($('arVid'), ar.cam); ar.cam = null;
+  if (ar.pick && S.flights.has(ar.pick)) select(ar.pick);
+}
+function arTag(i) {
+  if (!ar.pool[i]) { const el = document.createElement('div'); el.className = 'ar-tag'; el.innerHTML = '<i></i><div><b></b><span></span></div>'; $('arTags').appendChild(el); ar.pool[i] = el; }
+  return ar.pool[i];
+}
+const hzLine = (x1, y1, x2, y2) => { const l = $('arHz'); l.setAttribute('x1', x1); l.setAttribute('y1', y1); l.setAttribute('x2', x2); l.setAttribute('y2', y2); };
+function updateAR() {
+  const W = innerWidth, H = innerHeight, now = performance.now(), fresh = sense.live && now - sense.t < 1500;
+  const home = settings.place.name.split(',')[0];
+  $('arDir').textContent = fresh ? `Facing ${P16[pt16(sense.heading)]} ${String(Math.round(sense.heading)).padStart(3, '0')}° · ${Math.abs(Math.round(sense.pitch))}° ${sense.pitch < 0 ? 'down' : 'up'}` : 'Sky camera';
+  const msg = ar.err || (!fresh ? 'Waiting for the motion sensor…' : !sense.abs ? 'This phone doesn\'t report north. Drag sideways to line the tags up with the planes.'
+    : sense.pitch < -15 ? 'Point your phone up at the sky.' : settings.placeSrc !== 'gps' ? `Tags show the sky from ${home}. Use your location if you're somewhere else.`
+    : S.mode === 'sim' ? 'The live feed is down, so these are simulated planes.' : !inRange().length ? 'No aircraft within 185 km right now.' : '');
+  if ($('arMsg').textContent !== msg) $('arMsg').textContent = msg;
+  $('arGeo').hidden = settings.placeSrc === 'gps' || !!ar.err || !fresh; $('arReset').hidden = Math.abs(sense.nudge) < 0.5;
+  if (!fresh) { for (const el of ar.pool) el.hidden = true; $('arEdge').hidden = true; $('arInfo').hidden = true; hzLine(0, 0, 0, 0); return; }
+  const ax = axes(), fp = focal($('arVid'), W, H), hd = sense.heading;
+  // horizon: two points on it either side of where you face, stretched across the screen
+  const a = toScreen(hd - 10, 0, ax, W, H, fp, {}), b = toScreen(hd + 10, 0, ax, W, H, fp, {});
+  if (a.front && b.front) { const dx = b.x - a.x, dy = b.y - a.y, k = (W + H) * 2 / (Math.hypot(dx, dy) || 1); hzLine(a.x - dx * k, a.y - dy * k, a.x + dx * k, a.y + dy * k); } else hzLine(0, 0, 0, 0);
+  // tags, nearest first; the one nearest the middle of the screen is the one you're aiming at
+  const list = inRange().filter(o => o.r.elev > -1 || o.f.id === ar.pick).sort((p, q) => p.r.slant - q.r.slant), shown = [];
+  let aim = null, ad = (Math.min(W, H) * 0.18) ** 2, pickOn = false;
+  for (const { f, r } of list) {
+    toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
+    if (!arPt.front || arPt.x < -30 || arPt.x > W + 30 || arPt.y < -30 || arPt.y > H + 30) continue;
+    if (f.id === ar.pick) pickOn = true;
+    const d = (arPt.x - W / 2) ** 2 + (arPt.y - H / 2) ** 2; if (d < ad) { ad = d; aim = f; }
+    shown.push({ f, r, x: arPt.x, y: arPt.y });
+  }
+  ar.aim = aim?.id || null;
+  const rects = []; let n = 0;
+  for (const o of shown) {
+    const sel = o.f.id === ar.pick, top = sel || o.f.id === ar.aim;
+    if (n >= AR_MAX && !top) continue;
+    const w = 20 + Math.max(o.f.callsign.length * 10, 110), x = o.x, y = o.y - 16;
+    if (!top && rects.some(q => x < q[2] && x + w > q[0] && y < q[3] && y + 38 > q[1])) continue;
+    rects.push([x, y, x + w, y + 38]);
+    const el = arTag(n++), key = o.f.callsign + fmtAlt(o.f.alt) + Math.round(o.r.d) + sel + top + o.f.emg;
+    el._id = o.f.id; el._x = o.x; el._y = o.y;
+    if (el._key !== key) {
+      el._key = key; el.querySelector('b').textContent = o.f.callsign;
+      el.querySelector('span').textContent = `${o.f.type || D.typeName(o.f)} · ${fmtAlt(o.f.alt)} · ${o.r.d < 10 ? o.r.d.toFixed(1) : Math.round(o.r.d)} km`;
+      el.classList.toggle('sel', sel); el.classList.toggle('aim', top && !sel); el.classList.toggle('far', o.r.d > 80 && !top);
+      el.style.setProperty('--c', o.f.emg ? '#FF2B2B' : hexOf(altColor(o.f.alt, tmpC)));
+    }
+    el.style.transform = `translate(${o.x.toFixed(1)}px,${o.y.toFixed(1)}px)`; el.style.zIndex = top ? 2 : 1; el.hidden = false;
+  }
+  for (let i = n; i < ar.pool.length; i++) if (!ar.pool[i].hidden) ar.pool[i].hidden = true;
+  // the plane you tapped, when it's off the screen: an arrow at the edge showing which way to turn
+  const pf = ar.pick && S.flights.get(ar.pick);
+  if (pf && !pickOn) {
+    const r = rel(pf); toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
+    let dx = arPt.dx, dy = arPt.dy; if (!arPt.front && Math.hypot(dx, dy) < 0.2) { dx = wrap(r.brg - hd) > 0 ? 1 : -1; dy = 0; }
+    const ang = Math.atan2(dy, dx), ex = W / 2 + Math.cos(ang) * (W / 2 - 70), ey = H / 2 + Math.sin(ang) * (H / 2 - 130);
+    $('arEdge').hidden = false; $('arEdge').style.transform = `translate(${ex.toFixed(0)}px,${ey.toFixed(0)}px) translate(-50%,-50%)`;
+    $('arEdge').firstChild.style.transform = `rotate(${(ang * 180 / Math.PI + 180).toFixed(0)}deg)`;
+    const turnBy = wrap(r.brg - hd);
+    $('arEdgeT').textContent = r.elev < 0 ? `${pf.callsign} is below the horizon` : Math.abs(turnBy) > 25 ? `Turn ${turnBy > 0 ? 'right' : 'left'} for ${pf.callsign}` : `Tilt ${r.elev > sense.pitch ? 'up' : 'down'} for ${pf.callsign}`;
+  } else $('arEdge').hidden = true;
+  // the card at the bottom: the plane you tapped, or else the one in the middle
+  const id = ar.pick && S.flights.has(ar.pick) ? ar.pick : ar.aim;
+  if (id !== ar.infoId || now - ar.infoT > 500) { ar.infoId = id; ar.infoT = now; arInfo(id); }
+}
+function arInfo(id) {
+  const f = id && S.flights.get(id); $('arInfo').hidden = !f; if (!f) return;
+  const r = rel(f), rt = routeOf(f), al = D.airlineName(f.callsign) || rt?.airline || '';
+  if (f.kind === 'live') D.wantRoutes([f.callsign]);
+  $('arAl').textContent = [id === ar.pick ? 'Tracking' : 'You\'re pointing at', al].filter(Boolean).join(' · ');
+  $('arCall').textContent = f.callsign;
+  $('arSub').textContent = `${D.typeName(f)}${rt ? ` · ${rt.from.iata} to ${rt.to.iata}` : ''} · ${fmtAlt(f.alt)} · ${r.d < 10 ? r.d.toFixed(1) : Math.round(r.d)} km away, ${Math.max(0, Math.round(r.elev))}° up`;
+  const canSee = S.mode === 'live' && r.d < 120 && r.elev > 1, seen = S.mode === 'live' && seenBefore(f);
+  $('arSaw').hidden = !canSee && !seen; $('arSaw').disabled = seen; $('arSaw').textContent = seen ? 'Seen' : 'I saw it!';
+}
+$('arBtn').hidden = !coarse;
+$('arBtn').onclick = () => openAR(S.selId);
+$('arClose').onclick = e => { e.stopPropagation(); closeAR(); };
+$('arMore').onclick = e => { e.stopPropagation(); ar.pick = ar.pick || ar.aim; closeAR(); };
+$('arSaw').onclick = e => { e.stopPropagation(); const f = S.flights.get(ar.pick || ar.aim); if (f) { sawIt(f); ar.infoT = 0; } };
+$('arGeo').onclick = e => { e.stopPropagation(); useMyLocation($('arGeo'), m => { ar.err = m; setTimeout(() => { ar.err = ''; }, 6000); }); };
+$('arReset').onclick = e => { e.stopPropagation(); sense.nudge = 0; settings.nudge = 0; saveSettings(); };
+// tap a tag to track it, tap the sky to let go; drag sideways to turn the tags if the compass is off
+$('ar').addEventListener('pointerdown', e => { if (e.target.closest('button,.ar-info')) return; ar.drag = { x: e.clientX, id: e.pointerId, moved: false }; });
+$('ar').addEventListener('pointermove', e => {
+  const d = ar.drag; if (!d || d.id !== e.pointerId) return;
+  const dx = e.clientX - d.x; if (!d.moved && Math.abs(dx) < 10) return;
+  d.moved = true; d.x = e.clientX; sense.nudge = wrap(sense.nudge - dx / focal($('arVid'), innerWidth, innerHeight) * 180 / Math.PI);
+});
+$('ar').addEventListener('pointerup', e => {
+  const d = ar.drag; if (!d || d.id !== e.pointerId) return; ar.drag = null;
+  if (d.moved) { settings.nudge = +sense.nudge.toFixed(1); saveSettings(); return; }
+  let best = null, bd = 44 * 44; // the tag marker nearest the tap, or the tag you tapped
+  for (const el of ar.pool) { if (el.hidden) continue; const q = (e.clientX - el._x) ** 2 + (e.clientY - el._y) ** 2; if (q < bd) { bd = q; best = el._id; } }
+  const tag = e.target.closest('.ar-tag'); if (!best && tag) best = tag._id;
+  ar.pick = best || null; ar.infoT = 0;
+});
+$('ar').addEventListener('pointercancel', () => { ar.drag = null; });
+// Android: the compass needs no tap, so start it as soon as it could be useful
+if (coarse && !senseNeedsTap()) startSense();
 
 /* ---------------- view, zoom, time ---------------- */
 function setView(v) {
@@ -663,26 +824,66 @@ document.addEventListener('keydown', e => {
   if ((e.key === 'h' || e.key === 'H') && !typing) { recenter(); return; }
   if ((e.key === 'p' || e.key === 'P') && !typing) { setPhoto(!document.body.classList.contains('photo')); return; }
   if (e.key !== 'Escape') return;
+  if (ar.on) { closeAR(); return; }
   if (document.body.classList.contains('photo')) { setPhoto(false); return; }
   if (!$('placePop').hidden || !$('layersPop').hidden) { togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false); }
   else if (S.selId) select(null); else if (S.tab !== 'sky') setTab('sky');
 });
 $('presets').innerHTML = D.PLACES.map((p, i) => `<li><button data-i="${i}">${esc(p.name)}<small>${p.lat.toFixed(1)}, ${p.lon.toFixed(1)}</small></button></li>`).join('');
-$('presets').onclick = e => { const b = e.target.closest('button'); if (!b) return; setPlace(D.PLACES[+b.dataset.i]); togglePop('placePop', 'placeBtn', false); };
-$('geoBtn').onclick = () => {
-  const res = $('results');
-  if (!navigator.geolocation) { res.innerHTML = '<li class="lede">This browser can\'t share its location. Search for a place instead.</li>'; return; }
-  $('geoBtn').disabled = true; $('geoBtn').lastChild.textContent = 'Finding you…';
-  navigator.geolocation.getCurrentPosition(async pos => {
-    const { latitude: lat, longitude: lon } = pos.coords;
-    const name = await D.reverseGeocode(lat, lon);
-    $('geoBtn').disabled = false; $('geoBtn').lastChild.textContent = 'Use my current location';
-    setPlace({ name, lat, lon }); togglePop('placePop', 'placeBtn', false);
-  }, err => {
-    $('geoBtn').disabled = false; $('geoBtn').lastChild.textContent = 'Use my current location';
-    res.innerHTML = `<li class="lede">${err.code === 1 ? 'Location access was blocked. Allow it in your browser\'s site settings, or search for a place below.' : 'Couldn\'t get your location just now. Try again, or search for a place.'}</li>`;
-  }, { enableHighAccuracy: false, timeout: 12000, maximumAge: 600000 });
-};
+$('presets').onclick = e => { const b = e.target.closest('button'); if (!b) return; setPlace(D.PLACES[+b.dataset.i], false, 'pick'); togglePop('placePop', 'placeBtn', false); };
+$('geoBtn').onclick = async () => { if (await useMyLocation($('geoBtn'), m => { $('results').innerHTML = `<li class="lede">${esc(m)}</li>`; })) togglePop('placePop', 'placeBtn', false); };
+
+/* ---------------- your location ---------------- */
+// Everyone starts with a guess from their time zone, then gets asked once per visit until they share a location or pick a place.
+// With location already allowed, a returning visitor is quietly moved to where they are now.
+function tzGuess() {
+  try {
+    const city = (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop().replace(/_/g, ' ').replace('Calcutta', 'Kolkata');
+    if (!city) return null;
+    const p = D.PLACES.find(p => p.name.startsWith(city)); if (p) return p;
+    const a = D.AIRPORTS.find(a => a[2].startsWith(city)); if (a) return { name: a[2], lat: a[3], lon: a[4] };
+  } catch (e) { /* no Intl */ }
+  return null;
+}
+async function geoState() {
+  if (!window.isSecureContext) return 'insecure';
+  if (!navigator.geolocation) return 'none';
+  try { return (await navigator.permissions.query({ name: 'geolocation' })).state; } catch (e) { return 'prompt'; }
+}
+const locate = () => new Promise((ok, no) => navigator.geolocation.getCurrentPosition(p => ok({ lat: p.coords.latitude, lon: p.coords.longitude }), no, { enableHighAccuracy: false, timeout: 15000, maximumAge: 300000 }));
+async function useMyLocation(btn, fail) {
+  if (!window.isSecureContext) { fail('Browsers only share your location with secure (https) sites. Open Squawk from its https link, or search for your town.'); return false; }
+  if (!navigator.geolocation) { fail('This browser can\'t share its location. Search for your town instead.'); return false; }
+  const lbl = btn.lastChild.textContent; btn.disabled = true; btn.lastChild.textContent = 'Finding you…';
+  try {
+    const c = await locate(), name = await D.reverseGeocode(c.lat, c.lon);
+    setPlace({ name, lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); return true;
+  } catch (err) {
+    fail(err.code === 1 ? 'Location access is blocked for this site. Allow it in your browser\'s site settings, or search for your town.' : 'Couldn\'t get your location just now. Try again, or search for your town.'); return false;
+  } finally { btn.disabled = false; btn.lastChild.textContent = lbl; }
+}
+let welcomeDue = false;
+async function bootLocate() {
+  const st = await geoState();
+  if (st === 'granted' && settings.placeSrc !== 'pick') {
+    try {
+      const c = await locate(), h = settings.place;
+      if (settings.placeSrc === 'gps' && haversine(h.lat, h.lon, c.lat, c.lon) < 3) return; // still at home
+      setPlace({ name: await D.reverseGeocode(c.lat, c.lon), lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); return;
+    } catch (e) { /* fall through and ask */ }
+  }
+  if (settings.placeSrc) return;
+  const at = settings.place.name.split(',')[0];
+  $('welT').textContent = st === 'insecure' ? `You're looking at the sky over ${at}. Browsers only share your location with secure (https) sites, so search for your town to see the planes above you.`
+    : st === 'denied' ? `You're looking at the sky over ${at}. Location is blocked for this site: allow it in your browser's site settings, or search for your town.`
+    : `You're looking at the sky over ${at}. Share your location to see the planes above you right now. It stays in this browser.`;
+  $('welGeo').hidden = st === 'insecure' || st === 'none';
+  if (loaderDone) $('welcome').hidden = false; else welcomeDue = true;
+}
+$('welGeo').onclick = () => useMyLocation($('welGeo'), m => { $('welT').textContent = m; });
+$('welPick').onclick = e => { e.stopPropagation(); $('welcome').hidden = true; togglePop('placePop', 'placeBtn', true); $('searchQ').focus(); };
+$('welLater').onclick = () => { $('welcome').hidden = true; };
+
 let results = [];
 $('searchForm').onsubmit = async e => {
   e.preventDefault(); const q = $('searchQ').value.trim(); if (!q) return;
@@ -692,7 +893,7 @@ $('searchForm').onsubmit = async e => {
     res.innerHTML = results.length ? results.map((r, i) => `<li><button data-i="${i}" title="${esc(r.full)}">${esc(r.name)}<small>${r.lat.toFixed(2)}, ${r.lon.toFixed(2)}</small></button></li>`).join('') : '<li class="lede">No places found. Try a city name.</li>';
   } catch (err) { res.innerHTML = '<li class="lede">Search is unavailable right now. Pick a preset below.</li>'; }
 };
-$('results').onclick = e => { const b = e.target.closest('button'); if (!b) return; const r = results[+b.dataset.i]; setPlace(r); togglePop('placePop', 'placeBtn', false); };
+$('results').onclick = e => { const b = e.target.closest('button'); if (!b) return; const r = results[+b.dataset.i]; setPlace(r, false, 'pick'); togglePop('placePop', 'placeBtn', false); };
 
 function bindSeg(id, get, set) {
   const bs = document.querySelectorAll(`#${id} button`);
@@ -1039,12 +1240,16 @@ function frame() {
 function tick(dt) {
   const t = world.clock.elapsedTime;
   if (S.mode === 'sim') simStep(dt); else if (S.mode === 'live') reckon(dt);
-  const arr = [...S.flights.values()];
-  world.syncAircraft(arr, dt, t, S.selId);
-  const fp = S.follow && S.selId ? world.vis.get(S.selId)?.pos : null;
-  tickSats(); world.syncSats(S.sats.list, satT ? (Date.now() - satT) / 1000 : 0, settings.sats && S.sats.ready);
-  world.frame(dt, t, fp || null);
-  updateLabels(arr);
+  if (ar.on) { tickSats(); updateAR(); } // the 3D view is covered: skip drawing it
+  else {
+    const arr = [...S.flights.values()];
+    world.syncAircraft(arr, dt, t, S.selId);
+    const fp = S.follow && S.selId ? world.vis.get(S.selId)?.pos : null;
+    tickSats(); world.syncSats(S.sats.list, satT ? (Date.now() - satT) / 1000 : 0, settings.sats && S.sats.ready);
+    world.frame(dt, t, fp || null);
+    updateLabels(arr);
+    if (S.selId && sense.live) { const f = S.flights.get(S.selId); if (f) paintCompass(rel(f)); }
+  }
   if ((acc.pred += dt) > 2) { acc.pred = 0; if (S.mode !== 'boot') predictAll(); }
   if (S.tab === 'next' && (acc.next += dt) > 1) { acc.next = 0; renderPanel(false); }
   if ((acc.hud += dt) > 0.5) { acc.hud = 0; updateHUD(); }
@@ -1057,7 +1262,7 @@ function tick(dt) {
     const p = world.tileProgress(), k = p.total ? p.done / p.total : 0;
     $('loadArc').style.strokeDashoffset = String(1 - Math.max(0.03, Math.min(1, k * 0.8 + (S.feedResolved ? 0.2 : 0))));
     $('loadMsg').textContent = S.feedResolved ? 'Loading the ground' : 'Tuning to 1090 MHz';
-    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.intro(); showHint(); setTimeout(startSats, 1500); }
+    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.intro(); showHint(); if (welcomeDue && !settings.placeSrc) $('welcome').hidden = false; setTimeout(startSats, 1500); }
   }
 }
 
@@ -1066,5 +1271,6 @@ window.__squawk = { world, S, ingest: list => { if (S.mode !== 'live') { clearFl
   step: (n = 1, dt = 1 / 30) => { for (let i = 0; i < n; i++) { world.clock.elapsedTime += dt; tick(dt); } } };
 $('timeR').value = 0;
 paintLevel();
-setPlace(settings.place, true);
+setPlace(settings.placeSrc ? settings.place : tzGuess() || settings.place, true);
+bootLocate();
 requestAnimationFrame(frame);

@@ -109,14 +109,16 @@
     </div>
     <p class="eta" id="cEta" hidden></p>
     <div class="look">
-      <svg viewBox="0 0 120 120" aria-hidden="true">
-        <circle cx="60" cy="60" r="52" class="dial"/><circle cx="60" cy="60" r="34.7" class="dial dash"/><circle cx="60" cy="60" r="17.3" class="dial dash"/>
-        <line x1="60" y1="8" x2="60" y2="112" class="dial"/><line x1="8" y1="60" x2="112" y2="60" class="dial"/>
-        <text x="60" y="6" class="dl" text-anchor="middle" dominant-baseline="hanging">N</text><text x="116" y="60" class="dl" text-anchor="end" dominant-baseline="middle">E</text>
-        <text x="60" y="118" class="dl" text-anchor="middle">S</text><text x="4" y="60" class="dl" dominant-baseline="middle">W</text>
-        <line id="dLine" x1="60" y1="60" x2="60" y2="20" class="dline"/><circle id="dDot" cx="60" cy="20" r="5.5" class="ddot"/>
+      <svg viewBox="0 0 120 120" class="cmp" aria-hidden="true">
+        <g id="dRose"></g>
+        <path id="dYou" class="you off" d="M53 0h14l-7 9z"/>
+        <g id="dArrow"><path class="arr" d="M60 6l10 17h-6.5v13h-7V23H50z"/></g>
+        <circle cx="60" cy="60" r="21" class="hub"/>
+        <text x="60" y="57" id="dElev" class="el" text-anchor="middle" dominant-baseline="central">—</text>
+        <text x="60" y="72" class="elk" text-anchor="middle" dominant-baseline="central">UP</text>
       </svg>
-      <div><p class="k">Where to look</p><p class="look-text" id="cLook"></p><p class="sub" id="cDist"></p><p class="sub next" id="cNext" hidden></p></div>
+      <div><p class="k">Where to look</p><p class="look-text" id="cLook"></p><p class="look-up" id="cUp"></p><p class="sub" id="cDist"></p><p class="sub next" id="cNext" hidden></p></div>
+      <div class="look-b" id="cLookB" hidden><button class="btn" id="cCompass" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm3.5 6.5-2 5-5 2 2-5z"/></svg>Turn on compass</button><button class="btn primary" id="cAR"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10z"/></svg>Find it with the camera</button></div>
     </div>
     <p class="fact" id="cFact" hidden></p>
     <button class="btn saw" id="cSaw" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm0-6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg><span>I saw it!</span></button>
@@ -142,6 +144,11 @@
   <p class="coach-t" id="coachText"></p>
   <div class="coach-b"><button class="btn primary" id="coachSaw">I see it!</button><button class="btn" id="coachNext">Try another</button><button class="btn ghost" id="coachLater">Later</button></div>
 </div>
+<div class="coach welcome" id="welcome" hidden role="dialog" aria-labelledby="welH">
+  <p class="coach-h" id="welH">Is this your sky?</p>
+  <p class="coach-t" id="welT"></p>
+  <div class="coach-b"><button class="btn primary" id="welGeo"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>Use my location</button><button class="btn" id="welPick">Search a place</button><button class="btn ghost" id="welLater">Not now</button></div>
+</div>
 <div class="ping" id="ping" hidden role="status"><b id="pingHead"></b><span id="pingText"></span></div>
 
 <div class="hud-bl">
@@ -166,7 +173,21 @@
 
 <div class="hud-br">
   <div class="legend" aria-hidden="true"><div class="bar"></div><ul><li>FL380</li><li>FL190</li><li>0 ft</li></ul></div>
-  <div class="zoom"><button id="zIn" aria-label="Zoom in">+</button><button id="zOut" aria-label="Zoom out">−</button><button id="zHome" aria-label="Recentre on your location (H)" title="Recentre on your location (H)">⌖</button></div>
+  <div class="zoom"><button id="arBtn" class="ar-btn" hidden aria-label="Sky camera: point your phone at the sky" title="Sky camera"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8V5a2 2 0 0 1 2-2h3m8 0h3a2 2 0 0 1 2 2v3m0 8v3a2 2 0 0 1-2 2h-3m-8 0H5a2 2 0 0 1-2-2v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M17 13.5v-1l-4-2.5V7.2a1 1 0 0 0-2 0V10l-4 2.5v1l4-1.2v2.6l-1 .8v.8l2-.5 2 .5v-.8l-1-.8v-2.6z"/></svg></button><button id="zIn" aria-label="Zoom in">+</button><button id="zOut" aria-label="Zoom out">−</button><button id="zHome" aria-label="Recentre on your location (H)" title="Recentre on your location (H)">⌖</button></div>
+</div>
+
+<!-- sky camera -->
+<div class="ar" id="ar" hidden role="dialog" aria-label="Sky camera: point your phone at the sky to name the aircraft">
+  <video id="arVid" playsinline muted autoplay></video>
+  <svg class="ar-hz" aria-hidden="true"><line id="arHz" x1="0" y1="0" x2="0" y2="0"/></svg>
+  <div id="arTags"></div>
+  <div class="ar-aim" aria-hidden="true"></div>
+  <div class="ar-edge" id="arEdge" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 20 4l-4 8 4 8z"/></svg><span id="arEdgeT"></span></div>
+  <div class="ar-top">
+    <div class="ar-head"><b id="arDir"></b><span id="arMsg"></span><button class="ar-link" id="arGeo" hidden>Use my location</button><button class="ar-link" id="arReset" hidden>Reset alignment</button></div>
+    <button class="icon-btn" id="arClose" aria-label="Close the sky camera">✕</button>
+  </div>
+  <div class="ar-info" id="arInfo" hidden><div><p class="ar-al" id="arAl"></p><h3 id="arCall"></h3><p class="ar-sub" id="arSub"></p></div><div class="ar-act"><button class="btn saw" id="arSaw" hidden>I saw it!</button><button class="btn" id="arMore">Details</button></div></div>
 </div>
 
 <div class="photo-bar" id="photoBar" hidden>

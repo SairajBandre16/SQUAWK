@@ -11,7 +11,7 @@
 - **A whole live planet.** Squawk opens in space and drops down to you. Zoom out, or tap **Globe**, to spin the earth and watch live traffic across continents. Satellite tiles stream in as you zoom, with borders, place names and city lights on the night side.
 - **Live aircraft** from community ADS-B networks (ADSB.lol, airplanes.live and adsb.fi). Around you it refreshes every 5 seconds; look somewhere else and the feed follows the camera, with a wider radius the further out you zoom.
 - **Recentre anywhere.** Wherever you've wandered, the orange ⌖ button next to the HUD (or the one by the zoom buttons, or the **H** key) flies you straight back.
-- **Use your current location**, search any city or airport, or jump to a busy sky: Heathrow, Dubai, Mumbai, New York and more.
+- **Use your current location**, search any city or airport, or jump to a busy sky: Heathrow, Dubai, Mumbai, New York and more. First-time visitors start near their time zone's city and are asked to share their location.
 - **A real-world scene.** Satellite ground imagery with earth curvature. The sun's position is calculated for your location and time. Cloud cover, wind and haze come from live weather.
 - **Camera views.** *Orbit* is the 3D overview. *Map* is top-down. *Globe* pulls out to see the planet. *Ground view* puts you on the ground looking up at true angles, so the scene matches what you see outside.
 - **Controls.** Zoomed in, drag to orbit and tilt in 3D and right-drag (or two fingers) to move. Zoomed out, drag spins the globe and right-drag turns it. Scroll or pinch to zoom, double-click to zoom in on a spot.
@@ -23,7 +23,8 @@
 - **Made for newcomers.** A first-sighting guide walks you to a plane you can see right now. Tap "I saw it!" to log real sightings, earn XP and levels, keep a streak, complete daily missions, and collect 24 aircraft families.
 - **Photo mode** (P) hides the interface and saves a picture. An optional **rain radar** layer covers the globe.
 - **Time scrubber** to preview the sky at golden hour, sunset or night.
-- **Flight cards** with a photo of the actual aircraft (Planespotters.net), the route, altitude, speed, squawk code and a "where to look" sky dial.
+- **Flight cards** with a photo of the actual aircraft (Planespotters.net), the route, altitude, speed, squawk code and a "where to look" compass. On a phone the compass turns with you and says which way to turn and how high to look.
+- **Sky camera** (phones): point your phone at the sky and every aircraft in range gets a tag where it really is. Aim at a plane to see what it is, or tap a tag to track it with an arrow. If the phone's compass is off, drag sideways to line the tags up.
 - **Tabs:**
   - **Board:** a split-flap departures board of the nearest aircraft, plus a feed of landings, heavies, emergencies and overhead passes.
   - **Stats:** an altitude histogram, top airlines, aircraft sizes, a traffic trend and session records.
@@ -52,7 +53,7 @@ python3 serve.py
 # open http://localhost:8000
 ```
 
-Three.js r170 loads from jsDelivr through an import map. Geolocation needs `https://` or `localhost`.
+Three.js r170 loads from jsDelivr through an import map. Geolocation, the phone compass and the sky camera need `https://` or `localhost`.
 
 ## Project layout
 
