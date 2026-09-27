@@ -8,7 +8,7 @@ _Last updated: 27 Sept 2026_
 
 - **Live site:** Vercel deploys `main` to production and every other branch to a preview URL.
 - **Branches:** `main` and `globe` both contain everything below, and work continues on `globe`.
-- **Deploy:** the compass, sky camera and location prompt (`43f46e9`) were merged into `main` as `2f0cd89` and pushed to production.
+- **Deploy:** sign-in and the profile panel (`e436162`) were merged into `main` as `6ac5da4` and pushed to production. Accounts use the Firebase project `squawk-2f8c2`.
 - **Waiting on:** testing on real phones (iPhone and Android). Everything was only tested in desktop Chrome with fake sensor readings. Fix anything the owner finds on `globe` first.
 
 ## Done
@@ -62,8 +62,17 @@ _Last updated: 27 Sept 2026_
 - [x] Profile panel (tap your picture): level, catches, streak and best run, favourites, 12-week activity grid, latest badges, plane avatars or your own photo, display name, sign out, and "Start my log again"
 - [x] Without a Firebase project configured, the app runs as before with no account button
 - [x] Firebase project set up (Google and Email/Password on, `squawk-iota.vercel.app` authorised, Firestore created)
-- [ ] Owner: publish the updated `firestore.rules` (it now allows the `profile` field)
-- [ ] Test real sign-in on the deployed site (desktop and phone), including the Google popup on iOS Safari
+- [x] Updated `firestore.rules` published (allows the `profile` field)
+- [x] Live on production (`e436162`, merged into `main` as `6ac5da4`); the owner tested sign-in, the profile and the log reset on the live site
+- [ ] Test on phones: the Google popup on iOS Safari, and photo upload from the camera roll
+
+### Personal features to consider next
+- [ ] Home place and display settings follow the account across devices
+- [ ] Watchlist: star airlines, types, tails or callsigns and get alerted when one comes near
+- [ ] Sighting journal: each "I saw it" saved with time, place, a photo and a note, shown on a personal map
+- [ ] Saved places (home, work, holiday), each with its own stats
+- [ ] Personal records and a shareable monthly recap card
+- [ ] Friends and a local leaderboard (needs public profiles)
 
 ## Next up
 
