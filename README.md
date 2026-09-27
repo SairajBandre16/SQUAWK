@@ -21,6 +21,8 @@
 - **Satellites.** The ISS, Tiangong, Hubble and about 150 of the brightest satellites, with visible passes for the next 24 hours.
 - **Aircraft you can recognise:** ten model families (A380, 747, widebodies, turboprops, helicopters and more) with tails in airline colours.
 - **Made for newcomers.** A first-sighting guide walks you to a plane you can see right now. Tap "I saw it!" to log real sightings, earn XP and levels, keep a streak, complete daily missions, and collect 24 aircraft families.
+- **Your own account.** Sign in with Google or an email and password to keep your level, streak, badges and collection in your own space, on any device. Without an account, your log stays in the browser.
+- **Profile.** Tap your picture for a summary: level, catches, streaks, favourite type and airline, a 12-week activity grid and your latest badges. Pick a plane avatar or use your own photo, change your display name, or start your log again.
 - **Photo mode** (P) hides the interface and saves a picture. An optional **rain radar** layer covers the globe.
 - **Time scrubber** to preview the sky at golden hour, sunset or night.
 - **Flight cards** with a photo of the actual aircraft (Planespotters.net), the route, altitude, speed, squawk code and a "where to look" compass. On a phone the compass turns with you and says which way to turn and how high to look.
@@ -43,6 +45,18 @@ The community ADS-B networks don't send CORS headers, so a browser can't read th
 3. **Run it locally** with `python3 serve.py`. It serves the site and relays the feed.
 
 Weather, routes (adsbdb.com), photos and place search all work straight from the browser, so they don't need a relay.
+
+## Accounts (optional)
+
+Sign-in uses [Firebase](https://firebase.google.com) (free Spark plan). Until it's set up, the account button stays hidden and everyone's log lives in their own browser.
+
+1. Create a Firebase project, then add a **Web app** in Project settings.
+2. Copy its `apiKey`, `authDomain`, `projectId` and `appId` into `js/firebase-config.js`. These values are public; the rules below keep each person's data private.
+3. In **Authentication → Sign-in method**, turn on **Google** and **Email/Password**.
+4. In **Authentication → Settings → Authorised domains**, add your site's domain (for example `your-app.vercel.app`). `localhost` is already there.
+5. Create a **Firestore database** and paste `firestore.rules` into its **Rules** tab, then publish.
+
+Each spotter gets one document, `users/{uid}`, holding their log and profile. A profile photo is cropped to 192 px and stored in that document as a small JPEG (about 20 KB), so there's no need for Cloud Storage. A new account starts with an empty log; the browser's signed-out log stays separate. If two devices spot at the same time, their logs are merged, so neither loses a catch. When you change `firestore.rules`, paste it into the console again and publish.
 
 ## Run it locally
 
@@ -70,6 +84,9 @@ js/sats.js        satellites from CelesTrak, positions and visible passes
 js/models.js      aircraft model families and airline tail colours
 js/spotter.js     collection families, levels, missions, plain-English facts
 js/geo.js         projection, earth-centred frame, earth curvature, sun position
+js/cloud.js       sign-in (Google, email) and the cloud copy of the log
+js/firebase-config.js  your Firebase project settings (empty = no accounts)
+firestore.rules   Firestore rules: each spotter reads and writes only their own log
 serve.py          local server with a live-feed relay
 vercel.json       Vercel config that relays the feed
 _redirects        Netlify config that relays the feed

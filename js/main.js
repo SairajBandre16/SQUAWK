@@ -6,8 +6,9 @@ import { Proj, relative, P16, P16L, pt16, clamp, haversine, curvDrop, step, sunP
 import { closestApproach, transits, contrailAt, pressureAt } from './predict.js';
 import { Sats } from './sats.js';
 import { modelOf, LIVERY } from './models.js';
-import { FAMILIES, familyOf, levelOf, XP, missionsFor, today, streak, plainFacts, silhouette } from './spotter.js';
+import { FAMILIES, familyOf, levelOf, XP, missionsFor, today, streak, bestStreak, plainFacts, silhouette } from './spotter.js';
 import { sense, startSense, senseNeedsTap, headingNow, axes, toScreen, startCam, stopCam, focal, wrap } from './sense.js';
+import { cloudOn, onUser, signInGoogle, signInEmail, resetPassword, signOut, authError, syncLog } from './cloud.js';
 
 const $ = id => document.getElementById(id);
 const IN_RANGE = 185, FEED_NM = 100, POLL_MS = 5000;
@@ -59,7 +60,10 @@ addEventListener('resize', resize); resize();
 const LOGKEY = 'squawk.log.v2';
 // recent/seenHex remember which airframes were caught or seen in the last 12 h, so a reload doesn't count them twice
 const newLog = () => ({ types: {}, airlines: {}, badges: {}, tracked: 0, since: Date.now(), xp: 0, seen: 0, seenTypes: {}, days: [], day: null, recent: {}, seenHex: {} });
-const logLive = Object.assign(newLog(), store.get(LOGKEY, {}));
+// Signed in, the log belongs to the account (cached here as squawk.log.v2.<uid>); signed out, to this browser.
+let acct = cloudOn ? store.get('squawk.acct', null) : null;
+const logKey = () => acct ? LOGKEY + '.' + acct.uid : LOGKEY;
+const logLive = Object.assign(newLog(), store.get(logKey(), {}));
 const logSim = newLog();
 const theLog = () => (S.mode === 'live' ? logLive : logSim);
 const AGAIN = 12 * 3600e3;
@@ -67,16 +71,54 @@ let saveT = null;
 function writeLog() {
   clearTimeout(saveT); saveT = null; const t = Date.now();
   for (const m of [logLive.recent, logLive.seenHex]) if (m) for (const k in m) if (t - m[k] > AGAIN) delete m[k];
-  store.set(LOGKEY, logLive);
+  store.set(logKey(), logLive);
+  if (acct) { dirty = true; cloudSave(); }
 }
 const saveLog = () => { if (!saveT) saveT = setTimeout(writeLog, 1500); };
 addEventListener('pagehide', () => { if (saveT) writeLog(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && saveT) writeLog(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && saveT) writeLog(); if (!document.hidden) cloudSave(1500); });
+function useLog(v) {
+  v = { ...v }; for (const k in logLive) delete logLive[k]; Object.assign(logLive, newLog(), v); paintLevel();
+  if (S.tab === 'log' || (S.tab === 'profile' && !$('panel').contains(document.activeElement))) renderPanel(false);
+}
 // another tab saved its log: take that copy, so this tab's next save doesn't wipe the other's progress
 addEventListener('storage', e => {
-  if (e.key !== LOGKEY || !e.newValue) return;
-  try { const v = JSON.parse(e.newValue); for (const k in logLive) delete logLive[k]; Object.assign(logLive, newLog(), v); paintLevel(); } catch (x) { /* ignore a bad copy */ }
+  if (e.key !== logKey() || !e.newValue) return;
+  try { useLog(JSON.parse(e.newValue)); } catch (x) { /* ignore a bad copy */ }
 });
+/** Two copies of a log in one: the union of what was caught, the larger of each count. Safe to repeat. A newer reset wins outright. */
+function mergeLog(a, b) {
+  if (!a) return b; if (!b) return a;
+  if ((a.reset || 0) !== (b.reset || 0)) return (a.reset || 0) > (b.reset || 0) ? a : b;
+  const mx = (x, y) => Math.max(x || 0, y || 0), mn = (x, y) => x && y ? Math.min(x, y) : x || y, uni = (x, y) => [...new Set([...(x || []), ...(y || [])])];
+  const maxMap = (x, y) => { const r = { ...x }; for (const k in y) r[k] = mx(r[k], y[k]); return r; };
+  const o = Object.assign(newLog(), a, { tracked: mx(a.tracked, b.tracked), xp: mx(a.xp, b.xp), seen: mx(a.seen, b.seen), since: mn(a.since, b.since),
+    airlines: maxMap(a.airlines, b.airlines), seenTypes: maxMap(a.seenTypes, b.seenTypes), recent: maxMap(a.recent, b.recent), seenHex: maxMap(a.seenHex, b.seenHex),
+    badges: { ...a.badges }, types: {}, days: uni(a.days, b.days).sort().slice(-400) });
+  for (const k in b.badges) o.badges[k] = mn(o.badges[k], b.badges[k]);
+  for (const src of [a.types, b.types]) for (const k in src) { const t = src[k], e = o.types[k]; o.types[k] = e ? { n: mx(e.n, t.n), first: mn(e.first, t.first), al: uni(e.al, t.al).slice(0, 5) } : { n: t.n || 0, first: t.first || Date.now(), al: (t.al || []).slice(0, 5) }; }
+  const x = a.day, y = b.day;
+  o.day = !x ? y : !y ? x : x.date !== y.date ? (x.date > y.date ? x : y) : { date: x.date, airlines: uni(x.airlines, y.airlines), types: uni(x.types, y.types), done: { ...y.done, ...x.done } };
+  return o;
+}
+// the account copy is merged with the cloud a few seconds after changes, when the tab comes back, and on sign-in
+let cloudT = null, syncing = false, dirty = false;
+// the profile: display name and picture (av is a plane avatar id, 'photo' or 'google'); at = last edit
+const profKey = () => 'squawk.profile.' + acct.uid;
+let prof = acct ? store.get(profKey(), null) : null;
+function cloudSave(ms = 10000) { if (acct && !cloudT) cloudT = setTimeout(pushLog, ms); }
+async function pushLog() {
+  clearTimeout(cloudT); cloudT = null; if (!acct) return;
+  if (syncing) { cloudSave(); return; }
+  syncing = true; dirty = false; const uid = acct.uid; // a save while this runs marks it dirty again
+  try {
+    const r = await syncLog(uid, logLive, mergeLog, prof);
+    if (acct?.uid === uid) {
+      useLog(mergeLog(r.log, logLive)); store.set(logKey(), logLive);
+      if (r.profile && (r.profile.at || 0) > (prof?.at || 0)) { prof = r.profile; store.set(profKey(), prof); paintAcct(); }
+    }
+  } catch (e) { dirty = true; cloudSave(60000); } finally { syncing = false; }
+}
 const ICON_STAR = '<svg viewBox="0 0 24 24"><path d="M12 2l2.9 6.3 6.9.7-5.2 4.6 1.5 6.8L12 17l-6.1 3.4 1.5-6.8L2.2 9l6.9-.7z"/></svg>';
 const BADGES = [
   { id: 'first', name: 'First contact', desc: 'Track your first aircraft' },
@@ -802,9 +844,10 @@ $('timeR').oninput = e => { S.timeOff = +e.target.value; $('liveBtn').setAttribu
 $('liveBtn').onclick = () => { S.timeOff = 0; $('timeR').value = 0; $('liveBtn').setAttribute('aria-pressed', 'true'); updateSun(); };
 
 /* ---------------- popovers ---------------- */
+const POPS = [['placePop', 'placeBtn'], ['layersPop', 'layersBtn'], ['acctPop', 'acctBtn']];
 function togglePop(id, btn, show) {
   const el = $(id); const on = show ?? el.hidden; el.hidden = !on; $(btn).setAttribute('aria-expanded', String(on));
-  if (on) { for (const [o, b] of [['placePop', 'placeBtn'], ['layersPop', 'layersBtn']]) if (o !== id) { $(o).hidden = true; $(b).setAttribute('aria-expanded', 'false'); } }
+  if (on) { for (const [o, b] of POPS) if (o !== id) { $(o).hidden = true; $(b).setAttribute('aria-expanded', 'false'); } }
 }
 $('placeBtn').onclick = e => { e.stopPropagation(); togglePop('placePop', 'placeBtn'); if (!$('placePop').hidden) $('searchQ').focus(); };
 $('layersBtn').onclick = e => { e.stopPropagation(); togglePop('layersPop', 'layersBtn'); };
@@ -817,7 +860,7 @@ $('relayForm').onsubmit = e => {
   settings.relay = v; saveSettings(); D.feedConfig.relayUrl = v; D.resetFeedSources(); restartFeed();
 };
 document.addEventListener('pointerdown', e => {
-  for (const [o, b] of [['placePop', 'placeBtn'], ['layersPop', 'layersBtn']]) if (!$(o).hidden && !$(o).contains(e.target) && !$(b).contains(e.target) && !$('feedChip').contains(e.target)) togglePop(o, b, false);
+  for (const [o, b] of POPS) if (!$(o).hidden && !$(o).contains(e.target) && !$(b).contains(e.target) && !$('feedChip').contains(e.target)) togglePop(o, b, false);
 });
 document.addEventListener('keydown', e => {
   const typing = /INPUT|TEXTAREA/.test(document.activeElement?.tagName) || e.ctrlKey || e.metaKey || e.altKey;
@@ -826,7 +869,7 @@ document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if (ar.on) { closeAR(); return; }
   if (document.body.classList.contains('photo')) { setPhoto(false); return; }
-  if (!$('placePop').hidden || !$('layersPop').hidden) { togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false); }
+  if (POPS.some(([o]) => !$(o).hidden)) { for (const [o, b] of POPS) togglePop(o, b, false); }
   else if (S.selId) select(null); else if (S.tab !== 'sky') setTab('sky');
 });
 $('presets').innerHTML = D.PLACES.map((p, i) => `<li><button data-i="${i}">${esc(p.name)}<small>${p.lat.toFixed(1)}, ${p.lon.toFixed(1)}</small></button></li>`).join('');
@@ -910,6 +953,122 @@ $('tileCredit').textContent = TILE_STYLES[settings.style].credit;
 world.setStyle(settings.style); world.setNames(settings.names); world.setRadar(settings.radar);
 world.cloudsOn = settings.clouds;
 
+/* ---------------- account and profile ---------------- */
+const PERSON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zm0 2c-4.4 0-8 2.5-8 5.5V21h16v-1.5c0-3-3.6-5.5-8-5.5z"/></svg>';
+// plane avatars: a silhouette on a colour; everyone starts with one picked from their account id
+const AVATARS = [['a380', '#FF5A1F', 'A380'], ['jumbo', '#2563EB', '747'], ['wide', '#FF3D8B', 'Widebody'], ['narrow', '#16A34A', 'Narrowbody'], ['prop', '#D97706', 'Turboprop'],
+  ['heli', '#7C3AED', 'Helicopter'], ['light', '#0891B2', 'Light aircraft'], ['lifter', '#475569', 'Military transport'], ['rear', '#EA580C', 'Business jet'], ['quad', '#0D9488', 'Four-engine jet']].map(([id, c, name]) => ({ id, c, name }));
+const hashS = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h); };
+const avOf = () => prof?.av || AVATARS[hashS(acct?.uid || '') % AVATARS.length].id;
+const planeAv = a => `<span class="pa" style="--c:${a.c}">${silhouette(a.id)}</span>`;
+function avatar() {
+  const av = avOf();
+  if (av === 'photo' && prof?.photo) return `<img src="${esc(prof.photo)}" alt="">`;
+  if (av === 'google' && acct?.photo) return `<img src="${esc(acct.photo)}" alt="" referrerpolicy="no-referrer">`;
+  return planeAv(AVATARS.find(a => a.id === av) || AVATARS[0]);
+}
+const myName = () => prof?.name || acct?.name || (acct?.email || '').split('@')[0] || 'Spotter';
+function setProf(patch) {
+  if (!acct) return; prof = { ...prof, ...patch, at: Date.now() }; store.set(profKey(), prof); paintAcct(); pushLog();
+}
+let acctMode = 'in';
+function paintAcct() {
+  const b = $('acctBtn'), u = acct; b.hidden = !cloudOn; b.classList.toggle('in', !!u);
+  b.innerHTML = u ? avatar() : PERSON; b.setAttribute('aria-label', u ? `Your profile: ${myName()}` : 'Sign in');
+  if (S.tab === 'log' || (S.tab === 'profile' && !$('panel').contains(document.activeElement))) renderPanel(false);
+}
+function acctMsg(t, bad) { $('acctMsg').textContent = t; $('acctMsg').classList.toggle('bad', !!bad); }
+function paintAcctMode() {
+  $('emailGo').textContent = acctMode === 'new' ? 'Create account' : 'Sign in';
+  $('acctSwap').textContent = acctMode === 'new' ? 'Have an account? Sign in' : 'New here? Create an account';
+  $('pwQ').autocomplete = acctMode === 'new' ? 'new-password' : 'current-password'; $('acctForgot').hidden = acctMode === 'new';
+}
+// Moving between accounts (or back to this browser's own log) saves the old log first, then loads the new one.
+// A new account starts with an empty log; this browser's signed-out log stays where it is.
+function switchAcct(u) {
+  const was = acct?.uid || null, now = u?.uid || null;
+  if (saveT) writeLog();
+  if (was === now) { if (u) { acct = u; store.set('squawk.acct', u); paintAcct(); pushLog(); } return; }
+  const clean = !dirty; clearTimeout(cloudT); cloudT = null; dirty = false;
+  if (!u && was && clean) { try { localStorage.removeItem(LOGKEY + '.' + was); localStorage.removeItem('squawk.profile.' + was); } catch (e) { /* storage unavailable */ } } // all of it is in the cloud
+  acct = u; if (u) store.set('squawk.acct', u); else { try { localStorage.removeItem('squawk.acct'); } catch (e) { /* storage unavailable */ } }
+  prof = u ? store.get(profKey(), null) : null;
+  useLog(store.get(logKey(), null) || newLog()); store.set(logKey(), logLive);
+  if (!u && S.tab === 'profile') setTab('sky');
+  paintAcct();
+  if (u) pushLog();
+}
+async function busy(btn, job, msg = acctMsg) {
+  btn.disabled = true; msg('');
+  try { await job(); } catch (e) { msg(authError(e), true); } finally { btn.disabled = false; }
+}
+$('acctBtn').onclick = e => { e.stopPropagation(); if (acct) setTab(S.tab === 'profile' ? 'sky' : 'profile'); else togglePop('acctPop', 'acctBtn'); };
+$('gBtn').onclick = () => busy($('gBtn'), signInGoogle);
+$('acctSwap').onclick = () => { acctMode = acctMode === 'new' ? 'in' : 'new'; paintAcctMode(); acctMsg(''); };
+$('acctForgot').onclick = () => {
+  const m = $('emailQ').value.trim(); if (!m || !$('emailQ').checkValidity()) { acctMsg('Type your email above first, then tap "Forgot password?" again.', true); return; }
+  busy($('acctForgot'), async () => { await resetPassword(m); acctMsg(`If there's an account for ${m}, a reset link is on its way. Check your spam folder too.`); });
+};
+$('emailForm').onsubmit = e => { e.preventDefault(); busy($('emailGo'), () => signInEmail($('emailQ').value.trim(), $('pwQ').value, acctMode === 'new')); };
+paintAcct(); paintAcctMode();
+onUser(u => { if (u) { $('pwQ').value = ''; acctMsg(''); if (!$('acctPop').hidden) togglePop('acctPop', 'acctBtn', false); } switchAcct(u); });
+
+const dkey = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+function profileHTML() {
+  const lg = logLive, L = levelOf(lg.xp || 0), days = lg.days || [], types = Object.entries(lg.types), al = Object.entries(lg.airlines);
+  const fams = new Set(types.map(([c]) => familyOf(c)?.id).filter(Boolean)).size;
+  const topT = [...types].sort((a, b) => b[1].n - a[1].n)[0], topA = [...al].sort((a, b) => b[1] - a[1])[0];
+  const got = BADGES.filter(b => lg.badges[b.id]).sort((a, b) => lg.badges[b.id] - lg.badges[a.id]);
+  const since = new Date(lg.reset || lg.since || Date.now()).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  // the last 12 weeks, one square per day: columns are weeks starting on Monday
+  const on = new Set(days), d = new Date(); d.setHours(12); d.setDate(d.getDate() - ((d.getDay() + 6) % 7) - 77);
+  const now = dkey(new Date()), from = dkey(d); let heat = '';
+  for (let i = 0; i < 84; i++, d.setDate(d.getDate() + 1)) { const k = dkey(d); heat += `<i class="${k > now ? 'fut' : on.has(k) ? 'on' : ''}${k === now ? ' today' : ''}" title="${k}"></i>`; }
+  const active = days.filter(k => k >= from).length;
+  const tile = (k, v) => `<div class="tile"><p class="k">${k}</p><p class="v">${v}</p></div>`;
+  const fav = (k, v, s) => `<div class="fav"><small>${k}</small><b>${v ? esc(v) : '—'}</b>${v && s ? `<span>${esc(s)}</span>` : ''}</div>`;
+  const cur = avOf(), opt = (id, inner, label) => `<button class="av-opt" type="button" data-av="${id}" aria-pressed="${cur === id}" aria-label="${esc(label)}" title="${esc(label)}">${inner}</button>`;
+  return `<div class="pf-head"><span class="pf-av">${avatar()}</span><div class="pf-id"><h3>${esc(myName())}</h3><p>Level ${L.n} · ${esc(L.name)}</p><small>Log started ${since}</small></div></div>
+  <div class="pf-xp"><div class="xpbar"><i style="width:${Math.round(L.pct * 100)}%"></i></div><small>${L.xp.toLocaleString('en')} XP${L.to ? ` · ${(L.to - L.xp).toLocaleString('en')} to level ${L.n + 1}` : ' · top level'}</small></div>
+  <div class="tiles4">${tile('Caught', (lg.tracked || 0).toLocaleString('en'))}${tile('Types', types.length)}${tile('Airlines', al.length)}${tile('Seen', lg.seen || 0)}</div>
+  <div class="tiles4">${tile('Streak', streak(days))}${tile('Best run', bestStreak(days))}${tile('Days out', days.length)}${tile('Badges', `${got.length}/${BADGES.length}`)}</div>
+  <div><p class="sec-h">Favourites</p><div class="favs">${fav('Most caught', topT && (D.TYPES[topT[0]] || topT[0]), topT && `×${topT[1].n}`)}${fav('Top airline', topA && (D.AIRLINES[topA[0]] || topA[0]), topA && `×${topA[1]}`)}${fav('Collection', `${fams} of ${FAMILIES.length}`, 'families')}</div></div>
+  <div><p class="sec-h">Last 12 weeks · ${active} ${active === 1 ? 'day' : 'days'} spotting</p><div class="heat">${heat}</div></div>
+  <div><p class="sec-h">Latest badges</p>${got.length ? `<div class="pf-badges">${got.slice(0, 3).map(b => `<span class="chip-b">${ICON_STAR}${esc(b.name)}</span>`).join('')}</div>` : '<p class="lede">No badges yet. Your first catch earns one.</p>'}</div>
+  <div class="pf-edit"><p class="sec-h">Your picture</p>
+    <div class="av-grid">${AVATARS.map(a => opt(a.id, planeAv(a), a.name)).join('')}${prof?.photo ? opt('photo', `<img src="${esc(prof.photo)}" alt="">`, 'Your photo') : ''}${acct?.photo ? opt('google', `<img src="${esc(acct.photo)}" alt="" referrerpolicy="no-referrer">`, 'Google photo') : ''}</div>
+    <button class="btn wide" type="button" id="pfUpload"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10z"/></svg>${prof?.photo ? 'Change your photo' : 'Use your own photo'}</button>
+    <input type="file" id="pfFile" accept="image/*" hidden>
+    <p class="acct-msg" id="pfMsg" role="status"></p>
+    <p class="sec-h">Display name</p>
+    <form class="search" id="pfNameForm"><label class="sr" for="pfName">Display name</label><input id="pfName" maxlength="40" autocomplete="nickname" value="${esc(myName())}"><button class="btn" type="submit">Save</button></form></div>
+  <div class="pf-edit"><p class="sec-h">Account</p><p class="lede">Signed in as <b>${esc(acct?.email || '')}</b>. Your log, streak and badges are saved to your account and follow you to any device you sign in on.</p>
+    <div class="pf-actions"><button class="btn" type="button" id="signOutBtn">Sign out</button><button class="btn danger" type="button" id="resetBtn">Start my log again</button></div></div>`;
+}
+// a square crop, 192 px, as a JPEG data URL: about 20 KB, small enough to live in the profile document
+async function photoFrom(file) {
+  const img = await createImageBitmap(file), n = 192, c = document.createElement('canvas'), s = Math.min(img.width, img.height);
+  c.width = c.height = n; c.getContext('2d').drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, n, n);
+  return c.toDataURL('image/jpeg', 0.85);
+}
+function bindProfile() {
+  const msg = (t, bad) => { const el = $('pfMsg'); if (el) { el.textContent = t; el.classList.toggle('bad', !!bad); } };
+  for (const b of $('panelBody').querySelectorAll('.av-opt')) b.onclick = () => setProf({ av: b.dataset.av });
+  $('pfUpload').onclick = () => $('pfFile').click();
+  $('pfFile').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    if (f.size > 25e6) { msg('That picture is too big. Pick one under 25 MB.', true); return; }
+    try { setProf({ av: 'photo', photo: await photoFrom(f) }); } catch (x) { msg('Couldn\'t read that picture. Try a JPEG or PNG.', true); }
+  };
+  $('pfNameForm').onsubmit = e => { e.preventDefault(); const v = $('pfName').value.trim().slice(0, 40); $('pfName').blur(); setProf({ name: v }); flash('Name saved'); };
+  $('signOutBtn').onclick = () => busy($('signOutBtn'), async () => { if (saveT) writeLog(); if (dirty) await pushLog(); await signOut(); }, msg);
+  const r = $('resetBtn');
+  r.onclick = () => {
+    if (!r.classList.contains('armed')) { r.classList.add('armed'); r.textContent = 'Tap again to erase your log'; setTimeout(() => { r.classList.remove('armed'); r.textContent = 'Start my log again'; }, 4000); return; }
+    useLog({ ...newLog(), reset: Date.now() }); writeLog(); pushLog(); renderPanel(false); flash('Your log starts again from today');
+  };
+}
+
 /* ---------------- phone bottom sheets: drag the handle down to close, up to expand ---------------- */
 function sheet(el, close) {
   const g = el.querySelector('.grab'); let y0 = null, dy = 0;
@@ -926,7 +1085,7 @@ sheet($('panel'), () => setTab('sky')); sheet($('card'), () => select(null));
 /* ---------------- photo mode ---------------- */
 function setPhoto(on) {
   document.body.classList.toggle('photo', on); $('photoBar').hidden = !on; world.cinematic = on;
-  if (on) { togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false); }
+  if (on) for (const [o, b] of POPS) togglePop(o, b, false);
 }
 $('photoBtn').onclick = () => setPhoto(true); $('photoExit').onclick = () => setPhoto(false);
 $('shotBtn').onclick = () => {
@@ -940,7 +1099,7 @@ $('shotBtn').onclick = () => {
 };
 
 /* ---------------- tabs & panels ---------------- */
-const TAB_META = { next: ['Coming up', 460], board: ['Overhead board', 720], stats: ['Sky stats', 440], weather: ['Spotting weather', 420], log: ['Spotter\'s log', 460], codes: ['Squawk codes', 440] };
+const TAB_META = { next: ['Coming up', 460], board: ['Overhead board', 720], stats: ['Sky stats', 440], weather: ['Spotting weather', 420], log: ['Spotter\'s log', 460], codes: ['Squawk codes', 440], profile: ['Your profile', 460] };
 function setTab(t) {
   S.tab = t;
   document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
@@ -959,7 +1118,8 @@ function renderPanel(fresh) {
   else if (S.tab === 'next') { body.innerHTML = nextHTML(); for (const b of body.querySelectorAll('[data-id]')) b.onclick = () => { if (S.flights.has(b.dataset.id)) { select(b.dataset.id); setFollow(true); } }; for (const b of body.querySelectorAll('.alert-btn')) b.onclick = toggleAlerts; paintAlerts(); }
   else if (S.tab === 'stats') body.innerHTML = statsHTML();
   else if (S.tab === 'weather') { if (fresh || !renderPanel.wxDone) { body.innerHTML = weatherHTML(); renderPanel.wxDone = true; } }
-  else if (S.tab === 'log') { body.innerHTML = logHTML(); $('shareBtn').onclick = shareLog; }
+  else if (S.tab === 'profile') { if (!acct) { setTab('sky'); return; } body.innerHTML = profileHTML(); bindProfile(); }
+  else if (S.tab === 'log') { body.innerHTML = logHTML(); $('shareBtn').onclick = shareLog; if ($('logSignIn')) $('logSignIn').onclick = e => { e.stopPropagation(); togglePop('acctPop', 'acctBtn', true); }; }
   else if (S.tab === 'codes' && fresh) body.innerHTML = codesHTML();
   if (fresh) renderPanel.wxDone = S.tab === 'weather';
 }
@@ -1149,7 +1309,8 @@ function logHTML() {
   const byFam = new Map(); for (const [c, t] of types) { const f = familyOf(c); if (f) { const e = byFam.get(f.id) || { n: 0, seen: 0 }; e.n += t.n; e.seen += (lg.seenTypes || {})[c] || 0; byFam.set(f.id, e); } }
   const cards = FAMILIES.map(f => { const e = byFam.get(f.id); return e ? `<div class="cc">${silhouette(f.m)}<span class="n">×${e.n}</span>${e.seen ? `<span class="eye">seen ${e.seen}</span>` : ''}<b>${esc(f.name)}</b><small>${esc(f.fact)}</small></div>`
     : `<div class="cc locked">${silhouette(f.m)}<b>${esc(f.name)}</b><small>Not caught yet</small></div>`; }).join('');
-  return `${S.mode !== 'live' ? '<p class="note">You\'re watching simulated traffic, so these catches last only for this visit. Catches from the live feed are saved in this browser.</p>' : ''}
+  return `${S.mode !== 'live' ? `<p class="note">You're watching simulated traffic, so these catches last only for this visit. Catches from the live feed are saved ${acct ? 'to your account' : 'in this browser'}.</p>` : ''}
+  ${cloudOn && !acct ? '<p class="note">Your log is kept in this browser only. <button class="link" id="logSignIn" type="button">Sign in</button> to keep it in your own account on every device.</p>' : ''}
   <div class="lvl-card"><div class="lvl-n">${L.n}</div><div><b>${esc(L.name)}</b><div class="xpbar"><i style="width:${Math.round(L.pct * 100)}%"></i></div><small>${L.xp.toLocaleString('en')} XP${L.to ? ` · ${(L.to - L.xp).toLocaleString('en')} to level ${L.n + 1}` : ' · top level'}</small></div><div class="streak">${FLAME}${st}<small>day streak</small></div></div>
   <div><p class="sec-h">Today's missions</p><ul class="missions">${miss}</ul></div>
   <div class="tiles4"><div class="tile"><p class="k">Types</p><p class="v">${types.length}</p></div><div class="tile"><p class="k">Airlines</p><p class="v">${Object.keys(lg.airlines).length}</p></div><div class="tile"><p class="k">Seen by eye</p><p class="v">${lg.seen || 0}</p></div><div class="tile"><p class="k">Badges</p><p class="v">${got}/${BADGES.length}</p></div></div>

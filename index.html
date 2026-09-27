@@ -53,6 +53,7 @@
     <button class="chip" id="feedChip" data-mode="boot" aria-label="Live feed status"><i></i><span id="feedLabel">Connecting</span></button>
     <button class="icon-btn" id="photoBtn" aria-label="Photo mode (P)" title="Photo mode (P)"><svg viewBox="0 0 24 24"><path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg></button>
     <button class="icon-btn" id="layersBtn" aria-haspopup="dialog" aria-expanded="false" aria-label="Map and display settings"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5zm-9 9l9 5 9-5M3 16l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button>
+    <button class="icon-btn acct-btn" id="acctBtn" hidden aria-haspopup="dialog" aria-expanded="false" aria-label="Sign in"></button>
   </div>
 </header>
 
@@ -83,6 +84,23 @@
   <p class="pop-h">Live feed</p>
   <p class="feed-note" id="feedNote">Connecting to the flight-tracking networks.</p>
   <form id="relayForm" class="search"><label for="relayQ" class="sr">Relay URL</label><input id="relayQ" type="url" placeholder="Relay URL (optional)" autocomplete="off"><button class="btn" type="submit">Save</button></form>
+</div>
+
+<!-- account popover -->
+<div class="pop pop-right" id="acctPop" hidden role="dialog" aria-label="Your account">
+  <div class="acct" id="acctOut">
+    <p class="acct-h">Your own spotter's log</p>
+    <p class="lede">Sign in to keep your level, streak, badges and collection in your own account, on any device.</p>
+    <button class="btn wide g-btn" id="gBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5a5.6 5.6 0 0 1-2.4 3.6v3h3.9c2.3-2.1 3.5-5.2 3.5-8.8z"/><path fill="#34A853" d="M12 24c3.2 0 6-1.1 7.9-2.9l-3.9-3c-1 .7-2.4 1.2-4 1.2-3.1 0-5.7-2.1-6.7-4.9h-4v3.1A12 12 0 0 0 12 24z"/><path fill="#FBBC05" d="M5.3 14.4a7.2 7.2 0 0 1 0-4.7V6.6h-4a12 12 0 0 0 0 10.8z"/><path fill="#EA4335" d="M12 4.8c1.8 0 3.3.6 4.6 1.8l3.4-3.4A12 12 0 0 0 1.3 6.6l4 3.1c1-2.8 3.6-4.9 6.7-4.9z"/></svg>Continue with Google</button>
+    <p class="or"><span>or use your email</span></p>
+    <form class="acct-form" id="emailForm">
+      <label class="sr" for="emailQ">Email</label><input id="emailQ" type="email" placeholder="Email" autocomplete="email" required>
+      <label class="sr" for="pwQ">Password</label><input id="pwQ" type="password" placeholder="Password" autocomplete="current-password" minlength="6" required>
+      <button class="btn primary wide" type="submit" id="emailGo">Sign in</button>
+    </form>
+    <p class="acct-msg" id="acctMsg" role="status"></p>
+    <div class="acct-links"><button type="button" class="link" id="acctSwap">New here? Create an account</button><button type="button" class="link" id="acctForgot">Forgot password?</button></div>
+  </div>
 </div>
 
 <!-- tab panel -->
