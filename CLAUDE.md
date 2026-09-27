@@ -8,7 +8,7 @@ Squawk is a static, no-build, browser-only 3D plane-spotting app. It shows live 
 
 - Plain ES modules, no bundler, no `package.json`, no tests, no linter.
 - three.js r170 and satellite.js 6 load from jsDelivr through the import map in `index.html` (`three`, `three/addons/`, `satellite.js`).
-- Fonts load from Google Fonts. Everything else is local.
+- Fonts load from Google Fonts. The Firebase SDK (auth and Firestore, v12) loads from gstatic.com by dynamic import, and only when `js/firebase-config.js` has an `apiKey`. Everything else is local.
 
 ## Running
 
@@ -53,6 +53,9 @@ js/models.js      Ten low-poly model families (body + tail fin), modelOf(type, c
 js/spotter.js     FAMILIES for the collection, levels and XP, daily missions, streak, plainFacts(), silhouettes.
 js/sense.js       Phone heading and tilt (DeviceOrientation, iOS webkitCompassHeading), screen projection for the sky camera, rear-camera stream.
 js/geo.js         Local projection (Proj), earth-centred frame helpers, haversine/bearing, relative(), sun position, compass helpers.
+js/cloud.js       Firebase sign-in (Google popup with redirect fallback, email/password, reset) and syncLog() (Firestore transaction on users/{uid}).
+js/firebase-config.js  Firebase web config. Empty apiKey means no accounts: the account button stays hidden and the SDK never loads.
+firestore.rules   Each user reads and writes only users/{uid}, with fields log, profile and at (photo under 200 KB).
 ```
 
 ### Frames, coordinates and units (important)
@@ -71,6 +74,7 @@ js/geo.js         Local projection (Proj), earth-centred frame helpers, haversin
 
 - `S` is the single app state object: `flights` (a Map by id), `mode` (`boot` | `live` | `sim`), `selId`, `follow`, `tab`, `view`, `weather`, `timeOff`, `events`, `history`, `rec`, `region`, `proj` (home), `sim`.
 - `settings` persists to localStorage key `squawk.settings` (place, style, names, clouds, labels, relay). The spotter's log persists to `squawk.log.v2`, but only for live mode. Its `recent` and `seenHex` maps (hex to time, pruned after 12 h) stop the same airframe being caught or "seen" twice across reloads. The first-sighting guide, alerts and "I saw it" only run in live mode.
+- **Accounts.** `acct` (`{ uid, name, email, photo }`, cached as `squawk.acct`) picks the log: signed out it's `squawk.log.v2`, signed in it's `squawk.log.v2.<uid>`. `logLive` is one object mutated in place by `useLog()`; never reassign it. `writeLog()` marks it `dirty` and `cloudSave()` debounces `pushLog()` (10 s, and 1.5 s after the tab comes back), which runs `syncLog()`: read the cloud copy, `mergeLog()` it with this one, write back. `mergeLog()` is a union/max merge and safe to repeat. A log with a newer `reset` (set by "Start my log again") wins outright in `mergeLog()`, so a reset sticks across devices. `switchAcct()` runs on every auth change: a new account starts empty (the guest log is never merged in); signing out drops the local account caches unless there are unsynced changes. `prof` (`{ name, av, photo, at }`, cached as `squawk.profile.<uid>`) is the profile: `av` is a plane avatar id from `AVATARS`, `'photo'` (a 192 px JPEG data URL in `photo`) or `'google'`. It syncs in the same transaction, last edit wins by `at`. The profile panel is the `profile` tab (no tab button; the account button opens it), rendered by `profileHTML()` and wired by `bindProfile()`.
 - Open bugs from the Sept 2026 audit are in `BUGS.md`. What's done and what's next is tracked in `PROGRESS.md`; update it when work lands. Sim-mode catches go to a throwaway `logSim`. All storage goes through the try/catch `store` wrapper.
 - `setPlace(p, boot)` moves home: new `Proj`, `world.setHome()`, airports, clear flights, new `Sim`, weather, restart feed. On boot the camera starts in space above home and `world.intro()` flies down once the loader finishes. Later calls fly there.
 - **Feed follows the camera.** `region()` picks what to ask for. Looking at home, in ground view, before the loader finishes and whenever the mode isn't `live`, it asks for 100 nm around home every 5 s. `world.focus()`/`viewRadius()` use the `flyTo` target while a flight is under way. Elsewhere it centres on `world.focus()` with a radius from `world.viewRadius()` (100 to 3500 nm) and refreshes every 5, 10 or 30 s. `followView()` runs once a second and polls early when the view has moved or zoomed to a new region. `poll()` is generation-guarded by `feedGen`. On a first failure, or 3 in a row, it switches to `startSim()` and retries every 60 s.
@@ -112,7 +116,7 @@ js/geo.js         Local projection (Proj), earth-centred frame helpers, haversin
 ## Conventions
 
 - Dense, compact code style: short names, several statements per line, few comments. Match it.
-- No dependencies beyond three.js from the CDN. Do not add a build step unless asked.
+- No dependencies beyond three.js from the CDN (and the optional Firebase SDK from gstatic). Do not add a build step unless asked.
 - New tile or data sources must send CORS headers (images load with `crossOrigin = 'anonymous'`), or go through the relay.
 - Keep user-facing copy plain and friendly. The README and in-app text use British spelling ("colour").
 - Network helpers catch their own errors and degrade quietly (a missing photo, route or weather must not break the app).

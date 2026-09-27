@@ -56,6 +56,15 @@ _Last updated: 27 Sept 2026_
 - [x] Sky camera: point the phone at the sky to name the planes, tap to track, drag to fix the compass
 - [ ] Test on real phones: compass direction and iOS permission, camera field of view (tags line up with real planes), landscape, the welcome card, and moving home by location on return visits
 
+### Accounts (27 Sept 2026)
+- [x] Sign in with Google or email and password (Firebase). Each spotter's level, streak, badges, missions and collection live in their own account and follow them across devices
+- [x] New accounts start with an empty log (the signed-out browser log is no longer merged in); two devices spotting at once are merged, not overwritten
+- [x] Profile panel (tap your picture): level, catches, streak and best run, favourites, 12-week activity grid, latest badges, plane avatars or your own photo, display name, sign out, and "Start my log again"
+- [x] Without a Firebase project configured, the app runs as before with no account button
+- [x] Firebase project set up (Google and Email/Password on, `squawk-iota.vercel.app` authorised, Firestore created)
+- [ ] Owner: publish the updated `firestore.rules` (it now allows the `profile` field)
+- [ ] Test real sign-in on the deployed site (desktop and phone), including the Google popup on iOS Safari
+
 ## Next up
 
 The first four are the high-priority items from [BUGS.md](BUGS.md):

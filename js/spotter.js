@@ -63,6 +63,12 @@ export function missionsFor(date) {
   return out;
 }
 export const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+/** The longest run of consecutive days in the log. */
+export function bestStreak(days) {
+  const t = [...new Set(days)].sort().map(k => Date.UTC(+k.slice(0, 4), +k.slice(5, 7) - 1, +k.slice(8, 10)) / 864e5);
+  let best = 0, run = 0; t.forEach((d, i) => { run = i && d - t[i - 1] === 1 ? run + 1 : 1; if (run > best) best = run; });
+  return best;
+}
 /** Consecutive days with activity, ending today or yesterday. */
 export function streak(days) {
   const set = new Set(days); let n = 0; const d = new Date();

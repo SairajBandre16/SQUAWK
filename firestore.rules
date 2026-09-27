@@ -1,0 +1,15 @@
+rules_version = '2';
+// Each spotter can read and write only their own document, users/{uid}: their log and their profile.
+// A profile photo is a small JPEG data URL (about 20 KB), capped at 200 KB here.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['log', 'profile', 'at'])
+        && request.resource.data.log is map
+        && (!('profile' in request.resource.data) || (request.resource.data.profile is map
+          && (!('photo' in request.resource.data.profile) || request.resource.data.profile.photo.size() < 200000)));
+    }
+  }
+}
