@@ -31,7 +31,7 @@ if (settings.relay && !relayOK(settings.relay)) settings.relay = '';
 const saveSettings = () => store.set('squawk.settings', settings);
 const S = { flights: new Map(), mode: 'boot', provider: '', selId: null, follow: false, tab: 'sky', view: 'orbit', weather: null, timeOff: 0,
   events: [], history: [], rec: {}, booting: false, quiet: false, feedResolved: false, region: null, proj: null, sim: null,
-  pred: { over: [], tr: [], rare: [] }, sats: new Sats(), alerted: new Set() };
+  pred: { over: [], tr: [], rare: [] }, sats: new Sats(), alerted: new Map() };
 const hexOf = c => '#' + c.getHexString();
 const tmpC = new THREE.Color();
 const fmtAlt = km => { const ft = km * 3280.84; return ft >= 5000 ? 'FL' + String(Math.round(ft / 100)).padStart(3, '0') : (Math.round(ft / 100) * 100).toLocaleString('en') + ' ft'; };
@@ -304,27 +304,63 @@ function transitText(x) {
 
 // alerts: a toast while you're looking, plus a chime, a buzz and a system notification when you've switched them on
 let audio = null;
+const AC = () => (audio = audio || new (window.AudioContext || window.webkitAudioContext)());
+// sound made without a tap stays muted, so the first tap after a reload switches it on
+addEventListener('pointerdown', () => { if (settings.alerts) try { AC().resume(); } catch (e) { /* no audio */ } }, { once: true, capture: true });
 function chime() {
   try {
-    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    AC(); if (audio.state === 'suspended') audio.resume();
     const t = audio.currentTime;
     for (const [f, d] of [[880, 0], [1320, 0.12]]) { const o = audio.createOscillator(), g = audio.createGain(); o.frequency.value = f; g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.18, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.5); o.connect(g).connect(audio.destination); o.start(t + d); o.stop(t + d + 0.55); }
   } catch (e) { /* no audio */ }
 }
 function ping(key, head, text, id) {
-  if (S.alerted.has(key) || S.mode !== 'live') return; // never send anyone outside to look for a simulated plane
-  S.alerted.add(key);
+  if (S.mode !== 'live' || Date.now() - (S.alerted.get(key) || 0) < 2 * 3600e3) return; // never send anyone outside to look for a simulated plane
+  S.alerted.set(key, Date.now()); // the same plane can alert again on a later pass
   const el = $('ping'); $('pingHead').textContent = head; $('pingText').textContent = text; el.hidden = false; el.dataset.id = id || '';
   clearTimeout(ping.t); ping.t = setTimeout(() => { el.hidden = true; }, 9000);
   pushEvent('info', `${head === 'LOOK UP' ? 'Overhead' : cap(head.toLowerCase())}: ${text}`);
   if (!settings.alerts) return;
-  chime(); navigator.vibrate?.([80, 60, 80]);
-  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') { try { new Notification('Squawk · ' + head, { body: text, tag: key }); } catch (e) { /* not allowed here */ } }
+  if (document.hidden) notify(head, text, key, id); else { chime(); navigator.vibrate?.([80, 60, 80]); }
 }
+// System notifications go through the service worker when there is one: Android only shows them that way
+let swReg = null;
+function swStart() {
+  if (swReg || !('serviceWorker' in navigator) || !window.isSecureContext) return;
+  navigator.serviceWorker.register('sw.js').then(r => { swReg = r; }).catch(() => { /* notifications fall back to the page */ });
+}
+navigator.serviceWorker?.addEventListener('message', e => { if (e.data?.squawk === 'select' && S.flights.has(e.data.id)) select(e.data.id); });
+function notify(head, text, key, id) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const title = 'Squawk · ' + head, o = { body: text, tag: key, data: { id: id || '' } };
+  if (swReg?.active) { swReg.showNotification(title, o).catch(() => { /* blocked */ }); return; }
+  try { const n = new Notification(title, o); n.onclick = () => { focus(); if (id && S.flights.has(id)) select(id); n.close(); }; } catch (e) { /* not allowed here */ }
+}
+// A hidden tab gets no animation frames and its timers slow to once a minute. With alerts on, a worker's tick keeps the
+// feed, the planes and the look-ahead going so an alert can still reach you. With alerts off, the feed rests until you're back.
+let bgW = null, bgT = 0, bgPred = 0, pollAt = 0;
+function bgTick() {
+  if (!document.hidden) return;
+  const now = performance.now(), dt = bgT ? Math.min((now - bgT) / 1000, 30) : 0; bgT = now;
+  if (S.mode === 'live') reckon(dt);
+  if (!inflight && now >= pollAt) poll(feedGen);
+  if (now - bgPred > 2000 && S.mode !== 'boot') { bgPred = now; predictAll(); }
+}
+function bgSync() {
+  const want = settings.alerts && document.hidden;
+  if (want && !bgW) { try { bgW = new Worker('js/tick.js'); bgW.onmessage = bgTick; bgT = 0; } catch (e) { bgW = null; } }
+  else if (!want && bgW) { bgW.terminate(); bgW = null; }
+}
+document.addEventListener('visibilitychange', () => { bgSync(); if (!document.hidden && !inflight && performance.now() >= pollAt) poll(feedGen); });
+if (settings.alerts) swStart(); bgSync(); // opened in a background tab
 $('ping').onclick = () => { const id = $('ping').dataset.id; if (id && S.flights.has(id)) { select(id); } $('ping').hidden = true; };
 async function toggleAlerts() {
   settings.alerts = !settings.alerts; saveSettings();
-  if (settings.alerts) { chime(); if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) { /* ignored */ } } }
+  if (settings.alerts) {
+    chime(); swStart();
+    if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) { /* ignored */ } }
+    if (!('Notification' in window) || Notification.permission === 'denied') flash('Alerts will chime while Squawk is open. This browser blocks its notifications, so none arrive while Squawk is in the background.');
+  }
   paintAlerts();
 }
 function paintAlerts() { for (const b of document.querySelectorAll('.alert-btn')) { b.setAttribute('aria-pressed', String(settings.alerts)); b.lastChild.textContent = settings.alerts ? 'Alerts on' : 'Alert me'; } }
@@ -422,6 +458,7 @@ let feedGen = 0, pollT = null, fails = 0, inflight = false, lastReq = 0;
 function region() {
   const f = world.focus(), vr = world.viewRadius(), home = S.proj;
   // until the feed works, and in ground view (you stand at home), just ask for home: small, quick and what matters first
+  if (document.hidden) return { lat: home.lat0, lon: home.lon0, nm: FEED_NM, ms: 10000, home: true }; // only alerts need it now
   if (S.mode !== 'live' || !loaderDone || S.view === 'ground' || (haversine(home.lat0, home.lon0, f.lat, f.lon) < 120 && vr < 260)) return { lat: home.lat0, lon: home.lon0, nm: FEED_NM, ms: POLL_MS, home: true };
   const nm = [100, 250, 500, 1000, 2000, 3500].find(n => n * 1.852 >= vr) || 3500;
   return { lat: +f.lat.toFixed(2), lon: +f.lon.toFixed(2), nm, ms: nm <= 250 ? 5000 : nm <= 1000 ? 10000 : 30000 };
@@ -458,7 +495,7 @@ async function poll(gen) {
     if (e.rate) { wait = Math.max(reg.ms * 2, 20000); if (S.mode === 'boot') startSim(); }
     else { fails++; if (S.mode !== 'sim' && (S.mode === 'boot' || fails >= 3)) startSim(); if (S.mode === 'sim') wait = 60000; }
   } finally {
-    if (gen === feedGen) { inflight = false; S.feedResolved = true; pollT = setTimeout(() => poll(gen), wait); }
+    if (gen === feedGen) { inflight = false; S.feedResolved = true; pollAt = performance.now() + wait; if (!document.hidden || settings.alerts) pollT = setTimeout(() => poll(gen), wait); }
   }
 }
 function restartFeed() { feedGen++; clearTimeout(pollT); inflight = false; S.mode = 'boot'; S.region = null; S.feedResolved = false; setFeed('boot', 'Connecting'); poll(feedGen); }
@@ -478,7 +515,7 @@ function setPlace(p, boot, src) {
   world.setHome(p.lat, p.lon); world.setAirports(D.AIRPORTS, S.proj);
   if (boot) world.flyTo(p.lat, p.lon, SPACE_R, { instant: true, theta: 0, phi: 0 });
   else { if (S.view === 'ground') setView('orbit'); world.flyTo(p.lat, p.lon, HOME_R, S.view === 'top' ? { theta: 0, phi: 0.02 } : { theta: 0.6, phi: 1.02 }); }
-  clearFlights(); S.follow = false; S.pred = { over: [], tr: [], rare: [] }; world.setTransitLines([]);
+  clearFlights(); S.follow = false; S.pred = { over: [], tr: [], rare: [] }; S.alerted.clear(); world.setTransitLines([]);
   S.sim = new Sim(S.proj); S.history = []; S.rec = {}; satPredT = 0;
   buildPlaceLabels(); S.weather = null; loadWeather(); updateSun();
   restartFeed();

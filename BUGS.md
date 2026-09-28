@@ -6,7 +6,6 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 
 ## High
 
-- **System notifications never fire.** `ping()` only sends one when `document.hidden`, but `predictAll()` runs inside the `requestAnimationFrame` loop, which stops in hidden tabs. On Android, `new Notification()` also throws; it needs `ServiceWorkerRegistration.showNotification`. Fix: run predictions from a timer when the tab is hidden, and use a service worker on Android.
 - **Transit "hit" misses real dead-centre crossings** (`transits()` in `predict.js`). Sampling every 3 s moves a jet 2 to 14° across the sky between samples, so only about 7 in 30 centreline crossings are flagged. The card can then say "Move 0 m west". Use `move.d < width` for `hit`, or refine around the best sample.
 - **The moon position is off by up to 2.5°** (`moonPosition` in `geo.js`). It uses the short SunCalc series with no evection or variation terms, which is several disc widths. Every moon-transit alert is unreliable until it uses a fuller series (Meeus ch. 47).
 - **The transit centreline is tens of km off with a low sun** (`transits()`). The ground line is flat-earth but the look angles use a curved earth: about 42 km out at 3° sun elevation and 7 km at 6°. There is no refraction either.
@@ -18,7 +17,6 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 
 ### Feed and network
 - A hung network costs 8 s per source, tried one after another, so an outage takes about a minute to detect. `restartFeed()` doesn't abort the in-flight fetch, so the orphaned download keeps using data.
-- The feed keeps polling in hidden tabs: several MB every 30 s at continent zoom.
 - Satellite loading has no timeout (`Sats.load`). A hung request leaves `loading` true for good, and a failed fetch ignores the stale cache.
 - `Sats.predict` has no generation guard, so a quick place change can show passes for the old place.
 - Orbital elements are never refreshed within a session (`startSats` returns once `ready`).
@@ -41,8 +39,6 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 
 ### Look-ahead
 - Vertical rate is extrapolated linearly for up to 15 minutes. Arrivals are predicted at 0 altitude and dropped from "Overhead soon"; climbers are predicted above FL500.
-- The chime can stay silent all session after a reload. The AudioContext is created without a user gesture and never resumed.
-- `S.alerted` is never cleared. After a place change, reused sim ids are never alerted, and the same airframe passing again hours later doesn't alert.
 - Contrail humidity may be converted to ice twice if Open-Meteo serves ECMWF data (RH over ice below −23°C).
 - Closest approach ignores meridian convergence: about 15 km wrong at Svalbard, and meaningless at the poles.
 
@@ -109,6 +105,14 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 - Phones: the Board LOOK column needs horizontal scrolling, the place button is tiny, and `.hud-bc` blocks globe gestures.
 - `.photo` also matches `body.photo` in photo mode (no visible effect yet).
 - After a place change the old ping stays up to 9 s, old search results stay, and the guide still shows in photo mode.
+
+## Fixed (28 Sept 2026)
+
+- Sky camera tags sat off the real planes. Tags now use a live GPS fix while the camera is open, each aircraft's GNSS altitude, the ground height at home, and positions moved on by their age (the feed's `now` plus `seen_pos`). Angles are worked out every frame. On iOS a rough compass asks for a figure of eight.
+- System notifications now fire. With alerts on, a worker's timer (`js/tick.js`) keeps the feed (home only, every 10 s), dead reckoning and `predictAll()` going in a hidden tab. Notifications go through a service worker (`sw.js`), which Android needs. Tapping one opens the flight.
+- A hidden tab with alerts off no longer polls the feed. It polls again as soon as you come back.
+- The chime is switched on by the first tap after a reload.
+- `S.alerted` is cleared on a place change, and the same plane can alert again after 2 h.
 
 ## Fixed (27 Sept 2026)
 

@@ -2,7 +2,7 @@
 
 Where Squawk stands and what comes next. Update this file whenever a chunk of work lands. The full list of known bugs is in [BUGS.md](BUGS.md).
 
-_Last updated: 27 Sept 2026_
+_Last updated: 28 Sept 2026_
 
 ## Current state
 
@@ -66,6 +66,13 @@ _Last updated: 27 Sept 2026_
 - [x] Live on production (`e436162`, merged into `main` as `6ac5da4`); the owner tested sign-in, the profile and the log reset on the live site
 - [ ] Test on phones: the Google popup on iOS Safari, and photo upload from the camera roll
 
+### Sky camera accuracy and notifications (28 Sept 2026)
+- [x] Sky camera tags line up better: a live GPS fix while it's open, GNSS altitude, ground height, and positions moved on by their age
+- [x] Alerts reach you in a background tab: a worker keeps the feed and look-ahead running, and notifications go through a service worker (Android)
+- [x] Hidden tabs with alerts off stop polling the feed
+- [ ] Test on phones: tags against real planes (with and without location allowed), a LOOK UP notification with the screen off on Android, and tapping it
+- [ ] iOS only shows web notifications for sites added to the home screen, which needs a web app manifest
+
 ### Personal features to consider next
 - [ ] Home place and display settings follow the account across devices
 - [ ] Watchlist: star airlines, types, tails or callsigns and get alerted when one comes near
@@ -76,14 +83,13 @@ _Last updated: 27 Sept 2026_
 
 ## Next up
 
-The first four are the high-priority items from [BUGS.md](BUGS.md):
+The first three are the high-priority items from [BUGS.md](BUGS.md):
 
-- [ ] **Notifications.** Alerts never reach a hidden tab. Run predictions from a timer while the tab is hidden, and use a service worker for Android.
 - [ ] **Transits.** Detect dead-centre crossings reliably, use a better moon formula, and fix the curved-earth centreline for a low sun.
 - [ ] **Phone polish.** Stop iOS zooming into the search input (set the font to 16px), use `dvh` for popovers, and stop toasts and pills overlapping.
 - [ ] **Accessibility.** Remove `aria-live` from the panel and card (it floods screen readers), make Next rows work with the keyboard, and give tabs names.
 - [ ] **Globe view on slow connections.** A timeout should shrink the region instead of dropping into simulated traffic.
-- [ ] **Mobile data diet.** Pause or slow polling in hidden tabs, and abort the old request when the feed restarts.
+- [ ] **Mobile data diet.** Abort the old request when the feed restarts. (Hidden tabs now rest unless alerts are on.)
 - [ ] **Performance at 12k aircraft.** Cut per-frame allocations, stop sorting all ground-view labels, and handle the `MAXP` cap.
 
 ## Later
