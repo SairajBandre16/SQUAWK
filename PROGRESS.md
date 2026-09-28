@@ -8,7 +8,7 @@ _Last updated: 28 Sept 2026_
 
 - **Live site:** Vercel deploys `main` to production and every other branch to a preview URL.
 - **Branches:** `main` and `globe` both contain everything below, and work continues on `globe`.
-- **Deploy:** sign-in and the profile panel (`e436162`) were merged into `main` as `6ac5da4` and pushed to production. Accounts use the Firebase project `squawk-2f8c2`.
+- **Deploy:** the latest production merge is `f52a0d3` (28 Sept 2026): sky camera alignment, background notifications, home following your location, and a location prompt every visit. Accounts use the Firebase project `squawk-2f8c2`.
 - **Waiting on:** testing on real phones (iPhone and Android). Everything was only tested in desktop Chrome with fake sensor readings. Fix anything the owner finds on `globe` first.
 
 ## Done
