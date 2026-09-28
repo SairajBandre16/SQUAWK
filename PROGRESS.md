@@ -71,6 +71,7 @@ _Last updated: 28 Sept 2026_
 - [x] Alerts reach you in a background tab: a worker keeps the feed and look-ahead running, and notifications go through a service worker (Android)
 - [x] Hidden tabs with alerts off stop polling the feed
 - [x] Home follows your current location: every visit starts where you are, and home moves with you as you go (a picked place holds until the next visit)
+- [x] Every visit asks the browser for your location; the browser stays silent once you've allowed it. Without a location the welcome card explains why and offers a search
 - [ ] Test on phones: tags against real planes (with and without location allowed), a LOOK UP notification with the screen off on Android, and tapping it
 - [ ] iOS only shows web notifications for sites added to the home screen, which needs a web app manifest
 

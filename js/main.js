@@ -933,7 +933,7 @@ $('presets').onclick = e => { const b = e.target.closest('button'); if (!b) retu
 $('geoBtn').onclick = async () => { if (await useMyLocation($('geoBtn'), m => { $('results').innerHTML = `<li class="lede">${esc(m)}</li>`; })) togglePop('placePop', 'placeBtn', false); };
 
 /* ---------------- your location ---------------- */
-// Everyone starts with a guess from their time zone, then gets asked once per visit until they share a location or pick a place.
+// Everyone starts with a guess from their time zone (or their last place), then the browser is asked where they are.
 // With location allowed, every visit starts where you are, and home follows you as you move (followMe).
 function tzGuess() {
   try {
@@ -985,17 +985,18 @@ async function useMyLocation(btn, fail) {
   } finally { btn.disabled = false; btn.lastChild.textContent = lbl; }
 }
 let welcomeDue = false;
+// Every visit asks the browser for your location and starts there, even after a picked place. Once you've allowed it,
+// the browser answers without asking again. Without a location, the welcome card explains and offers a search.
 async function bootLocate() {
-  const st = await geoState();
-  if (st === 'granted') { // every visit starts where you are, even after a picked place
+  let st = await geoState();
+  if (st === 'granted' || st === 'prompt') {
     try {
       const c = await locate();
       if (settings.placeSrc === 'gps') movedTo(c.lat, c.lon);
       else setPlace({ name: await D.reverseGeocode(c.lat, c.lon), lat: c.lat, lon: c.lon }, !loaderDone, 'gps');
       followMe(); return;
-    } catch (e) { /* fall through and ask */ }
+    } catch (e) { st = await geoState(); } // refused, dismissed or no fix
   }
-  if (settings.placeSrc) return;
   const at = settings.place.name.split(',')[0];
   $('welT').textContent = st === 'insecure' ? `You're looking at the sky over ${at}. Browsers only share your location with secure (https) sites, so search for your town to see the planes above you.`
     : st === 'denied' ? `You're looking at the sky over ${at}. Location is blocked for this site: allow it in your browser's site settings, or search for your town.`
@@ -1503,7 +1504,7 @@ function tick(dt) {
     const p = world.tileProgress(), k = p.total ? p.done / p.total : 0;
     $('loadArc').style.strokeDashoffset = String(1 - Math.max(0.03, Math.min(1, k * 0.8 + (S.feedResolved ? 0.2 : 0))));
     $('loadMsg').textContent = S.feedResolved ? 'Loading the ground' : 'Tuning to 1090 MHz';
-    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.intro(); showHint(); if (welcomeDue && !settings.placeSrc) $('welcome').hidden = false; setTimeout(startSats, 1500); }
+    if ((k > 0.7 && S.feedResolved) || performance.now() - bootT > 7000) { loaderDone = true; loader.classList.add('done'); world.intro(); showHint(); if (welcomeDue) $('welcome').hidden = false; setTimeout(startSats, 1500); }
   }
 }
 
