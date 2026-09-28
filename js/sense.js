@@ -8,7 +8,8 @@ const norm = v => { const l = Math.hypot(v.x, v.y, v.z) || 1; v.x /= l; v.y /= l
 export const wrap = a => ((a % 360) + 540) % 360 - 180; // -180..180
 
 /** live: sensor events are arriving. abs: the heading is tied to north. nudge: the viewer's own correction, in degrees. */
-export const sense = { live: false, abs: false, heading: null, pitch: 0, R: V(), U: V(), F: V(), nudge: 0, t: 0, err: '' };
+/** acc: iOS's own compass error in degrees (negative when it needs calibrating), null elsewhere. */
+export const sense = { live: false, abs: false, heading: null, pitch: 0, R: V(), U: V(), F: V(), nudge: 0, t: 0, err: '', acc: null };
 let on = false, hasAbs = false, off = null, first = true;
 
 // heading of where the phone points: the camera direction when upright, the top edge when flat, a blend in between
@@ -29,7 +30,7 @@ function onOri(e, absEvt) {
   if (ios) { // Safari's alpha starts anywhere; webkitCompassHeading says where north is
     const h = headOf(F, U);
     if (h != null) { const d = wrap(e.webkitCompassHeading - h); off = off == null ? d : off + wrap(d - off) * 0.1; }
-    rot = off ?? 0; sense.abs = off != null;
+    rot = off ?? 0; sense.abs = off != null; sense.acc = typeof e.webkitCompassAccuracy === 'number' ? e.webkitCompassAccuracy : null;
   } else sense.abs = absEvt || !!e.absolute;
   rot += sense.nudge;
   for (const v of [R, U, F]) turn(v, rot);

@@ -31,7 +31,7 @@ if (settings.relay && !relayOK(settings.relay)) settings.relay = '';
 const saveSettings = () => store.set('squawk.settings', settings);
 const S = { flights: new Map(), mode: 'boot', provider: '', selId: null, follow: false, tab: 'sky', view: 'orbit', weather: null, timeOff: 0,
   events: [], history: [], rec: {}, booting: false, quiet: false, feedResolved: false, region: null, proj: null, sim: null,
-  pred: { over: [], tr: [], rare: [] }, sats: new Sats(), alerted: new Set() };
+  pred: { over: [], tr: [], rare: [] }, sats: new Sats(), alerted: new Map() };
 const hexOf = c => '#' + c.getHexString();
 const tmpC = new THREE.Color();
 const fmtAlt = km => { const ft = km * 3280.84; return ft >= 5000 ? 'FL' + String(Math.round(ft / 100)).padStart(3, '0') : (Math.round(ft / 100) * 100).toLocaleString('en') + ' ft'; };
@@ -304,27 +304,63 @@ function transitText(x) {
 
 // alerts: a toast while you're looking, plus a chime, a buzz and a system notification when you've switched them on
 let audio = null;
+const AC = () => (audio = audio || new (window.AudioContext || window.webkitAudioContext)());
+// sound made without a tap stays muted, so the first tap after a reload switches it on
+addEventListener('pointerdown', () => { if (settings.alerts) try { AC().resume(); } catch (e) { /* no audio */ } }, { once: true, capture: true });
 function chime() {
   try {
-    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    AC(); if (audio.state === 'suspended') audio.resume();
     const t = audio.currentTime;
     for (const [f, d] of [[880, 0], [1320, 0.12]]) { const o = audio.createOscillator(), g = audio.createGain(); o.frequency.value = f; g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.18, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.5); o.connect(g).connect(audio.destination); o.start(t + d); o.stop(t + d + 0.55); }
   } catch (e) { /* no audio */ }
 }
 function ping(key, head, text, id) {
-  if (S.alerted.has(key) || S.mode !== 'live') return; // never send anyone outside to look for a simulated plane
-  S.alerted.add(key);
+  if (S.mode !== 'live' || Date.now() - (S.alerted.get(key) || 0) < 2 * 3600e3) return; // never send anyone outside to look for a simulated plane
+  S.alerted.set(key, Date.now()); // the same plane can alert again on a later pass
   const el = $('ping'); $('pingHead').textContent = head; $('pingText').textContent = text; el.hidden = false; el.dataset.id = id || '';
   clearTimeout(ping.t); ping.t = setTimeout(() => { el.hidden = true; }, 9000);
   pushEvent('info', `${head === 'LOOK UP' ? 'Overhead' : cap(head.toLowerCase())}: ${text}`);
   if (!settings.alerts) return;
-  chime(); navigator.vibrate?.([80, 60, 80]);
-  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') { try { new Notification('Squawk · ' + head, { body: text, tag: key }); } catch (e) { /* not allowed here */ } }
+  if (document.hidden) notify(head, text, key, id); else { chime(); navigator.vibrate?.([80, 60, 80]); }
 }
+// System notifications go through the service worker when there is one: Android only shows them that way
+let swReg = null;
+function swStart() {
+  if (swReg || !('serviceWorker' in navigator) || !window.isSecureContext) return;
+  navigator.serviceWorker.register('sw.js').then(r => { swReg = r; }).catch(() => { /* notifications fall back to the page */ });
+}
+navigator.serviceWorker?.addEventListener('message', e => { if (e.data?.squawk === 'select' && S.flights.has(e.data.id)) select(e.data.id); });
+function notify(head, text, key, id) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const title = 'Squawk · ' + head, o = { body: text, tag: key, data: { id: id || '' } };
+  if (swReg?.active) { swReg.showNotification(title, o).catch(() => { /* blocked */ }); return; }
+  try { const n = new Notification(title, o); n.onclick = () => { focus(); if (id && S.flights.has(id)) select(id); n.close(); }; } catch (e) { /* not allowed here */ }
+}
+// A hidden tab gets no animation frames and its timers slow to once a minute. With alerts on, a worker's tick keeps the
+// feed, the planes and the look-ahead going so an alert can still reach you. With alerts off, the feed rests until you're back.
+let bgW = null, bgT = 0, bgPred = 0, pollAt = 0;
+function bgTick() {
+  if (!document.hidden) return;
+  const now = performance.now(), dt = bgT ? Math.min((now - bgT) / 1000, 30) : 0; bgT = now;
+  if (S.mode === 'live') reckon(dt);
+  if (!inflight && now >= pollAt) poll(feedGen);
+  if (now - bgPred > 2000 && S.mode !== 'boot') { bgPred = now; predictAll(); }
+}
+function bgSync() {
+  const want = settings.alerts && document.hidden;
+  if (want && !bgW) { try { bgW = new Worker('js/tick.js'); bgW.onmessage = bgTick; bgT = 0; } catch (e) { bgW = null; } }
+  else if (!want && bgW) { bgW.terminate(); bgW = null; }
+}
+document.addEventListener('visibilitychange', () => { bgSync(); if (!document.hidden && !inflight && performance.now() >= pollAt) poll(feedGen); });
+if (settings.alerts) swStart(); bgSync(); // opened in a background tab
 $('ping').onclick = () => { const id = $('ping').dataset.id; if (id && S.flights.has(id)) { select(id); } $('ping').hidden = true; };
 async function toggleAlerts() {
   settings.alerts = !settings.alerts; saveSettings();
-  if (settings.alerts) { chime(); if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) { /* ignored */ } } }
+  if (settings.alerts) {
+    chime(); swStart();
+    if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) { /* ignored */ } }
+    if (!('Notification' in window) || Notification.permission === 'denied') flash('Alerts will chime while Squawk is open. This browser blocks its notifications, so none arrive while Squawk is in the background.');
+  }
   paintAlerts();
 }
 function paintAlerts() { for (const b of document.querySelectorAll('.alert-btn')) { b.setAttribute('aria-pressed', String(settings.alerts)); b.lastChild.textContent = settings.alerts ? 'Alerts on' : 'Alert me'; } }
@@ -376,20 +412,25 @@ const staleAfter = () => Math.max(40, (S.region?.ms || POLL_MS) / 1000 * 2.5);
 // feed values are checked, not trusted: a bad number would put NaN into the camera, a non-string would throw mid-batch
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : typeof v === 'number' && Number.isFinite(v) ? String(v).slice(0, n) : '');
-function ingest(list) {
-  const now = performance.now() / 1000;
+// Positions arrive a few seconds old: the feed's own age (now, in ms) plus each aircraft's seen_pos. Move each one on by that
+// much so it's drawn where it is now, not where it was, which matters when you hold a phone up to it.
+function ingest(list, at) {
+  const now = performance.now() / 1000, lag = at ? clamp((Date.now() - at) / 1000, 0, 15) : 0;
   if (list.length > 20000) list = list.slice(0, 20000);
   for (const a of list) {
     if (!a || typeof a !== 'object' || a.alt_baro === 'ground') continue;
     const lat = num(a.lat), lon = num(a.lon), hex = str(a.hex, 12).toLowerCase();
     if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180 || !hex) continue;
-    const ft = num(a.alt_baro) ?? num(a.alt_geom);
+    const ft = num(a.alt_baro) ?? num(a.alt_geom), gft = num(a.alt_geom);
     if (ft == null || ft > 200000) continue;
     const id = 'h' + hex, cs = str(a.flight, 10), reg = str(a.r, 12);
     const d = { hex, lat, lon, alt: Math.max(0, ft * 0.0003048), spd: clamp(num(a.gs) ?? 0, 0, 2500) * 0.000514444,
       vr: clamp(num(a.baro_rate) ?? num(a.geom_rate) ?? 0, -20000, 20000) * 0.00000508, squawk: str(a.squawk, 4), type: str(a.t, 6).toUpperCase(), desc: str(a.desc, 60), reg,
       cat: str(a.category, 2), callsign: cs || reg || hex.toUpperCase(), lastFix: now, kind: 'live', mil: !!(a.dbFlags & 1), odd: !!(a.dbFlags & 2) };
     const trk = num(a.track) ?? num(a.true_heading) ?? num(a.mag_heading);
+    if (gft != null && num(a.alt_baro) != null) d.dg = clamp((gft - ft) * 0.0003048, -1.5, 1.5); // GNSS minus pressure altitude, for true look angles
+    const age = clamp(num(a.seen_pos) ?? 0, 0, 30) + lag;
+    if (age > 0.2 && trk != null) { step(d, trk, d.spd * age); d.alt = Math.max(0, d.alt + d.vr * Math.min(age, 10)); }
     const f = S.flights.get(id);
     if (!f) addFlight({ id, trk: trk ?? 0, turn: 0, ...d });
     else { const was = f.emg, ty = f.type; Object.assign(f, d); if (trk != null) f.trk = trk; f.emg = D.isEmergency(f); if (f.emg && !was) emergency(f); if (ty !== f.type) dress(f); }
@@ -417,6 +458,7 @@ let feedGen = 0, pollT = null, fails = 0, inflight = false, lastReq = 0;
 function region() {
   const f = world.focus(), vr = world.viewRadius(), home = S.proj;
   // until the feed works, and in ground view (you stand at home), just ask for home: small, quick and what matters first
+  if (document.hidden) return { lat: home.lat0, lon: home.lon0, nm: FEED_NM, ms: 10000, home: true }; // only alerts need it now
   if (S.mode !== 'live' || !loaderDone || S.view === 'ground' || (haversine(home.lat0, home.lon0, f.lat, f.lon) < 120 && vr < 260)) return { lat: home.lat0, lon: home.lon0, nm: FEED_NM, ms: POLL_MS, home: true };
   const nm = [100, 250, 500, 1000, 2000, 3500].find(n => n * 1.852 >= vr) || 3500;
   return { lat: +f.lat.toFixed(2), lon: +f.lon.toFixed(2), nm, ms: nm <= 250 ? 5000 : nm <= 1000 ? 10000 : 30000 };
@@ -442,10 +484,10 @@ async function poll(gen) {
   const reg = S.region = region();
   let wait = reg.ms;
   try {
-    const { list, provider } = await D.fetchAircraft(reg.lat, reg.lon, reg.nm);
+    const { list, provider, now: at } = await D.fetchAircraft(reg.lat, reg.lon, reg.nm);
     if (gen !== feedGen) return;
-    if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; S.booting = true; ingest(list); S.booting = false; }
-    else ingest(list);
+    if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; S.booting = true; ingest(list, at); S.booting = false; }
+    else ingest(list, at);
     S.provider = provider; fails = 0; setFeed('live', 'Live · ' + provider);
   } catch (e) {
     if (gen !== feedGen) return;
@@ -453,7 +495,7 @@ async function poll(gen) {
     if (e.rate) { wait = Math.max(reg.ms * 2, 20000); if (S.mode === 'boot') startSim(); }
     else { fails++; if (S.mode !== 'sim' && (S.mode === 'boot' || fails >= 3)) startSim(); if (S.mode === 'sim') wait = 60000; }
   } finally {
-    if (gen === feedGen) { inflight = false; S.feedResolved = true; pollT = setTimeout(() => poll(gen), wait); }
+    if (gen === feedGen) { inflight = false; S.feedResolved = true; pollAt = performance.now() + wait; if (!document.hidden || settings.alerts) pollT = setTimeout(() => poll(gen), wait); }
   }
 }
 function restartFeed() { feedGen++; clearTimeout(pollT); inflight = false; S.mode = 'boot'; S.region = null; S.feedResolved = false; setFeed('boot', 'Connecting'); poll(feedGen); }
@@ -468,12 +510,13 @@ function followView() {
 // On the first load the camera starts in space above home; later moves fly there.
 function setPlace(p, boot, src) {
   settings.place = { name: p.name, lat: p.lat, lon: p.lon }; if (src) { settings.placeSrc = src; $('welcome').hidden = true; } saveSettings();
+  if (src === 'pick') stopFollowMe(); homeAt = { lat: p.lat, lon: p.lon };
   S.proj = new Proj(p.lat, p.lon); $('placeName').textContent = p.name;
   const back = 'Back to ' + p.name.split(',')[0]; $('recenterBtn').dataset.tip = back; $('recenterBtn').setAttribute('aria-label', back + ' (H)');
   world.setHome(p.lat, p.lon); world.setAirports(D.AIRPORTS, S.proj);
   if (boot) world.flyTo(p.lat, p.lon, SPACE_R, { instant: true, theta: 0, phi: 0 });
   else { if (S.view === 'ground') setView('orbit'); world.flyTo(p.lat, p.lon, HOME_R, S.view === 'top' ? { theta: 0, phi: 0.02 } : { theta: 0.6, phi: 1.02 }); }
-  clearFlights(); S.follow = false; S.pred = { over: [], tr: [], rare: [] }; world.setTransitLines([]);
+  clearFlights(); S.follow = false; S.pred = { over: [], tr: [], rare: [] }; S.alerted.clear(); world.setTransitLines([]);
   S.sim = new Sim(S.proj); S.history = []; S.rec = {}; satPredT = 0;
   buildPlaceLabels(); S.weather = null; loadWeather(); updateSun();
   restartFeed();
@@ -481,7 +524,7 @@ function setPlace(p, boot, src) {
 }
 async function loadWeather() {
   const at = S.proj;
-  try { const w = await D.fetchWeather(at.lat0, at.lon0); if (at !== S.proj) return; S.weather = w; world.setWeather(w); }
+  try { const w = await D.fetchWeather(at.lat0, at.lon0); if (at !== S.proj) return; S.weather = w; world.setWeather(w); if (Number.isFinite(w.elevation)) at.h = clamp(w.elevation, -500, 6000) / 1000; }
   catch (e) { if (at !== S.proj) return; world.setWeather(null); }
   if (S.tab === 'weather') renderPanel(true);
   updateSun();
@@ -705,8 +748,17 @@ $('cAR').onclick = () => openAR(S.selId);
 
 /* ---------------- sky camera ---------------- */
 // Point the phone at the sky: the camera fills the screen and every aircraft in range gets a tag where it really is.
-// Tags use true angles from home, so they line up when you stand at home. Drag sideways to fix a compass that's off.
-const ar = { on: false, cam: null, pick: null, aim: null, pool: [], drag: null, infoT: 0, infoId: undefined, err: '' };
+// Tags use true angles from where you stand (a live GPS fix while it's open, else home). Drag sideways to fix a compass that's off.
+const ar = { on: false, cam: null, pick: null, aim: null, pool: [], drag: null, infoT: 0, infoId: undefined, err: '', watch: null, obs: null };
+// where you're standing while the camera is open: a live GPS fix beats home, which can be a few km out (or a picked town)
+function arWatch() {
+  if (ar.watch != null || !navigator.geolocation || !window.isSecureContext) return;
+  ar.watch = navigator.geolocation.watchPosition(p => { const c = p.coords; if (c.accuracy <= 2000) ar.obs = { lat0: c.latitude, lon0: c.longitude, h: S.proj.h || 0, acc: c.accuracy }; },
+    () => { /* no fix: tags stay on home */ }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+}
+const arAway = () => (ar.obs ? haversine(ar.obs.lat0, ar.obs.lon0, S.proj.lat0, S.proj.lon0) : 0);
+const arObs = () => (ar.obs && arAway() < 60 ? ar.obs : S.proj); // further than that, the planes around you aren't loaded
+const arRel = f => relative(f, arObs());
 const AR_MAX = 30, arPt = {};
 async function openAR(id) {
   if (ar.on) return;
@@ -714,6 +766,7 @@ async function openAR(id) {
   ar.on = true; ar.pick = id && S.flights.has(id) ? id : null; ar.aim = null; ar.infoId = undefined; ar.err = '';
   $('ar').hidden = false; $('ar').classList.remove('nocam'); $('arMsg').textContent = 'Starting the camera…';
   togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false);
+  geoState().then(st => { if (ar.on && st === 'granted') arWatch(); });
   const [okS, cam] = await Promise.all([sP, cP]);
   if (!ar.on) { stopCam($('arVid'), cam); return; }
   ar.cam = cam; $('ar').classList.toggle('nocam', !cam);
@@ -723,6 +776,7 @@ async function openAR(id) {
 function closeAR() {
   if (!ar.on) return;
   ar.on = false; $('ar').hidden = true; stopCam($('arVid'), ar.cam); ar.cam = null;
+  if (ar.watch != null) navigator.geolocation.clearWatch(ar.watch); ar.watch = null; ar.obs = null;
   if (ar.pick && S.flights.has(ar.pick)) select(ar.pick);
 }
 function arTag(i) {
@@ -732,20 +786,22 @@ function arTag(i) {
 const hzLine = (x1, y1, x2, y2) => { const l = $('arHz'); l.setAttribute('x1', x1); l.setAttribute('y1', y1); l.setAttribute('x2', x2); l.setAttribute('y2', y2); };
 function updateAR() {
   const W = innerWidth, H = innerHeight, now = performance.now(), fresh = sense.live && now - sense.t < 1500;
-  const home = settings.place.name.split(',')[0];
+  const home = settings.place.name.split(',')[0], away = arAway(), far = away >= 60, rough = sense.acc != null && (sense.acc < 0 || sense.acc > 30);
   $('arDir').textContent = fresh ? `Facing ${P16[pt16(sense.heading)]} ${String(Math.round(sense.heading)).padStart(3, '0')}° · ${Math.abs(Math.round(sense.pitch))}° ${sense.pitch < 0 ? 'down' : 'up'}` : 'Sky camera';
   const msg = ar.err || (!fresh ? 'Waiting for the motion sensor…' : !sense.abs ? 'This phone doesn\'t report north. Drag sideways to line the tags up with the planes.'
-    : sense.pitch < -15 ? 'Point your phone up at the sky.' : settings.placeSrc !== 'gps' ? `Tags show the sky from ${home}. Use your location if you're somewhere else.`
+    : sense.pitch < -15 ? 'Point your phone up at the sky.' : far ? `You're ${Math.round(away)} km from ${home}. Use your location to see the planes around you.`
+    : !ar.obs && settings.placeSrc !== 'gps' ? `Tags show the sky from ${home}. Use your location if you're somewhere else.`
+    : rough ? 'The compass is unsure. Wave your phone in a figure of eight, or drag sideways to line the tags up.'
     : S.mode === 'sim' ? 'The live feed is down, so these are simulated planes.' : !inRange().length ? 'No aircraft within 185 km right now.' : '');
   if ($('arMsg').textContent !== msg) $('arMsg').textContent = msg;
-  $('arGeo').hidden = settings.placeSrc === 'gps' || !!ar.err || !fresh; $('arReset').hidden = Math.abs(sense.nudge) < 0.5;
+  $('arGeo').hidden = (settings.placeSrc === 'gps' || !!ar.obs) && !far || !!ar.err || !fresh; $('arReset').hidden = Math.abs(sense.nudge) < 0.5;
   if (!fresh) { for (const el of ar.pool) el.hidden = true; $('arEdge').hidden = true; $('arInfo').hidden = true; hzLine(0, 0, 0, 0); return; }
   const ax = axes(), fp = focal($('arVid'), W, H), hd = sense.heading;
   // horizon: two points on it either side of where you face, stretched across the screen
   const a = toScreen(hd - 10, 0, ax, W, H, fp, {}), b = toScreen(hd + 10, 0, ax, W, H, fp, {});
   if (a.front && b.front) { const dx = b.x - a.x, dy = b.y - a.y, k = (W + H) * 2 / (Math.hypot(dx, dy) || 1); hzLine(a.x - dx * k, a.y - dy * k, a.x + dx * k, a.y + dy * k); } else hzLine(0, 0, 0, 0);
   // tags, nearest first; the one nearest the middle of the screen is the one you're aiming at
-  const list = inRange().filter(o => o.r.elev > -1 || o.f.id === ar.pick).sort((p, q) => p.r.slant - q.r.slant), shown = [];
+  const list = inRange().map(({ f }) => ({ f, r: arRel(f) })).filter(o => o.r.elev > -1 || o.f.id === ar.pick).sort((p, q) => p.r.slant - q.r.slant), shown = [];
   let aim = null, ad = (Math.min(W, H) * 0.18) ** 2, pickOn = false;
   for (const { f, r } of list) {
     toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
@@ -776,7 +832,7 @@ function updateAR() {
   // the plane you tapped, when it's off the screen: an arrow at the edge showing which way to turn
   const pf = ar.pick && S.flights.get(ar.pick);
   if (pf && !pickOn) {
-    const r = rel(pf); toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
+    const r = arRel(pf); toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
     let dx = arPt.dx, dy = arPt.dy; if (!arPt.front && Math.hypot(dx, dy) < 0.2) { dx = wrap(r.brg - hd) > 0 ? 1 : -1; dy = 0; }
     const ang = Math.atan2(dy, dx), ex = W / 2 + Math.cos(ang) * (W / 2 - 70), ey = H / 2 + Math.sin(ang) * (H / 2 - 130);
     $('arEdge').hidden = false; $('arEdge').style.transform = `translate(${ex.toFixed(0)}px,${ey.toFixed(0)}px) translate(-50%,-50%)`;
@@ -790,7 +846,7 @@ function updateAR() {
 }
 function arInfo(id) {
   const f = id && S.flights.get(id); $('arInfo').hidden = !f; if (!f) return;
-  const r = rel(f), rt = routeOf(f), al = D.airlineName(f.callsign) || rt?.airline || '';
+  const r = arRel(f), rt = routeOf(f), al = D.airlineName(f.callsign) || rt?.airline || '';
   if (f.kind === 'live') D.wantRoutes([f.callsign]);
   $('arAl').textContent = [id === ar.pick ? 'Tracking' : 'You\'re pointing at', al].filter(Boolean).join(' · ');
   $('arCall').textContent = f.callsign;
@@ -803,7 +859,7 @@ $('arBtn').onclick = () => openAR(S.selId);
 $('arClose').onclick = e => { e.stopPropagation(); closeAR(); };
 $('arMore').onclick = e => { e.stopPropagation(); ar.pick = ar.pick || ar.aim; closeAR(); };
 $('arSaw').onclick = e => { e.stopPropagation(); const f = S.flights.get(ar.pick || ar.aim); if (f) { sawIt(f); ar.infoT = 0; } };
-$('arGeo').onclick = e => { e.stopPropagation(); useMyLocation($('arGeo'), m => { ar.err = m; setTimeout(() => { ar.err = ''; }, 6000); }); };
+$('arGeo').onclick = async e => { e.stopPropagation(); if (await useMyLocation($('arGeo'), m => { ar.err = m; setTimeout(() => { ar.err = ''; }, 6000); }) && ar.on) arWatch(); };
 $('arReset').onclick = e => { e.stopPropagation(); sense.nudge = 0; settings.nudge = 0; saveSettings(); };
 // tap a tag to track it, tap the sky to let go; drag sideways to turn the tags if the compass is off
 $('ar').addEventListener('pointerdown', e => { if (e.target.closest('button,.ar-info')) return; ar.drag = { x: e.clientX, id: e.pointerId, moved: false }; });
@@ -878,7 +934,7 @@ $('geoBtn').onclick = async () => { if (await useMyLocation($('geoBtn'), m => { 
 
 /* ---------------- your location ---------------- */
 // Everyone starts with a guess from their time zone, then gets asked once per visit until they share a location or pick a place.
-// With location already allowed, a returning visitor is quietly moved to where they are now.
+// With location allowed, every visit starts where you are, and home follows you as you move (followMe).
 function tzGuess() {
   try {
     const city = (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop().replace(/_/g, ' ').replace('Calcutta', 'Kolkata');
@@ -893,14 +949,37 @@ async function geoState() {
   if (!navigator.geolocation) return 'none';
   try { return (await navigator.permissions.query({ name: 'geolocation' })).state; } catch (e) { return 'prompt'; }
 }
-const locate = () => new Promise((ok, no) => navigator.geolocation.getCurrentPosition(p => ok({ lat: p.coords.latitude, lon: p.coords.longitude }), no, { enableHighAccuracy: false, timeout: 15000, maximumAge: 300000 }));
+const locate = () => new Promise((ok, no) => navigator.geolocation.getCurrentPosition(p => ok({ lat: p.coords.latitude, lon: p.coords.longitude }), no, { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 }));
+// Home follows you while location is on: a short move shifts it in place (planes, camera and log stay), a long one
+// (you've travelled) moves home properly. Picking a place stops it until the next visit or "Use my location".
+let followId = null, homeAt = null; // homeAt: where the weather, name and passes were last loaded
+function followMe() {
+  if (followId != null || !navigator.geolocation || !window.isSecureContext) return;
+  followId = navigator.geolocation.watchPosition(p => { const c = p.coords; if (c.accuracy <= 1500) movedTo(c.latitude, c.longitude); },
+    () => { /* no fix: home stays put */ }, { enableHighAccuracy: false, maximumAge: 30000, timeout: 60000 });
+}
+function stopFollowMe() { if (followId != null) navigator.geolocation.clearWatch(followId); followId = null; }
+async function movedTo(lat, lon) {
+  if (settings.placeSrc !== 'gps') return;
+  const d = haversine(S.proj.lat0, S.proj.lon0, lat, lon);
+  if (d < 0.3) return;
+  if (d > 25) { setPlace({ name: await D.reverseGeocode(lat, lon), lat, lon }, !loaderDone, 'gps'); return; }
+  const h = S.proj.h; S.proj = new Proj(lat, lon); S.proj.h = h;
+  settings.place = { ...settings.place, lat, lon }; saveSettings();
+  world.setHome(lat, lon); world.setAirports(D.AIRPORTS, S.proj); updateSun();
+  if (haversine(homeAt.lat, homeAt.lon, lat, lon) > 5) {
+    homeAt = { lat, lon }; satPredT = 0; loadWeather();
+    const name = await D.reverseGeocode(lat, lon);
+    if (name && S.proj.lat0 === lat && S.proj.lon0 === lon) { settings.place.name = name; saveSettings(); $('placeName').textContent = name; }
+  }
+}
 async function useMyLocation(btn, fail) {
   if (!window.isSecureContext) { fail('Browsers only share your location with secure (https) sites. Open Squawk from its https link, or search for your town.'); return false; }
   if (!navigator.geolocation) { fail('This browser can\'t share its location. Search for your town instead.'); return false; }
   const lbl = btn.lastChild.textContent; btn.disabled = true; btn.lastChild.textContent = 'Finding you…';
   try {
     const c = await locate(), name = await D.reverseGeocode(c.lat, c.lon);
-    setPlace({ name, lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); return true;
+    setPlace({ name, lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); followMe(); return true;
   } catch (err) {
     fail(err.code === 1 ? 'Location access is blocked for this site. Allow it in your browser\'s site settings, or search for your town.' : 'Couldn\'t get your location just now. Try again, or search for your town.'); return false;
   } finally { btn.disabled = false; btn.lastChild.textContent = lbl; }
@@ -908,11 +987,12 @@ async function useMyLocation(btn, fail) {
 let welcomeDue = false;
 async function bootLocate() {
   const st = await geoState();
-  if (st === 'granted' && settings.placeSrc !== 'pick') {
+  if (st === 'granted') { // every visit starts where you are, even after a picked place
     try {
-      const c = await locate(), h = settings.place;
-      if (settings.placeSrc === 'gps' && haversine(h.lat, h.lon, c.lat, c.lon) < 3) return; // still at home
-      setPlace({ name: await D.reverseGeocode(c.lat, c.lon), lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); return;
+      const c = await locate();
+      if (settings.placeSrc === 'gps') movedTo(c.lat, c.lon);
+      else setPlace({ name: await D.reverseGeocode(c.lat, c.lon), lat: c.lat, lon: c.lon }, !loaderDone, 'gps');
+      followMe(); return;
     } catch (e) { /* fall through and ask */ }
   }
   if (settings.placeSrc) return;
@@ -1428,7 +1508,7 @@ function tick(dt) {
 }
 
 // console hooks for debugging; step(n) runs n frames by hand, which also works while the tab is in the background
-window.__squawk = { world, S, ingest: list => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list); },
+window.__squawk = { world, S, ingest: (list, at) => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list, at); },
   step: (n = 1, dt = 1 / 30) => { for (let i = 0; i < n; i++) { world.clock.elapsedTime += dt; tick(dt); } } };
 $('timeR').value = 0;
 paintLevel();

@@ -139,7 +139,7 @@ export async function fetchAircraft(lat, lon, nm) {
       if (!r.ok || !ct.includes('json')) { if ([401, 403, 404, 405].includes(r.status) || (r.ok && !ct.includes('json'))) dead.add(s.key); throw new Error('HTTP ' + r.status); }
       const j = await r.json(); const ac = j.ac || j.aircraft;
       if (!Array.isArray(ac)) throw new Error('bad payload');
-      lastGood = s.key; return { list: ac, provider: s.name };
+      lastGood = s.key; return { list: ac, provider: s.name, now: typeof j.now === 'number' ? j.now : null };
     } catch (e) { lastErr = e; if (e.rate) rated = e; if (e instanceof TypeError && s.key.startsWith('direct:')) dead.add(s.key); }
   }
   throw rated || lastErr || new Error('no provider');
@@ -201,7 +201,7 @@ export async function fetchWeather(lat, lon) {
     jet = { speed: j.hourly.wind_speed_250hPa?.[i], dir: j.hourly.wind_direction_250hPa?.[i] };
     levels = LEVELS.map(p => ({ p, T: j.hourly[`temperature_${p}hPa`]?.[i], rh: j.hourly[`relative_humidity_${p}hPa`]?.[i] })).filter(l => l.T != null && l.rh != null);
   }
-  return { ...c, jet, levels, sunrise: j.daily?.sunrise?.[0], sunset: j.daily?.sunset?.[0], tz: j.timezone, utcOffset: j.utc_offset_seconds };
+  return { ...c, elevation: j.elevation, jet, levels, sunrise: j.daily?.sunrise?.[0], sunset: j.daily?.sunset?.[0], tz: j.timezone, utcOffset: j.utc_offset_seconds };
 }
 
 export async function geocode(q) {

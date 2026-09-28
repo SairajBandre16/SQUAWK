@@ -55,6 +55,8 @@ js/sense.js       Phone heading and tilt (DeviceOrientation, iOS webkitCompassHe
 js/geo.js         Local projection (Proj), earth-centred frame helpers, haversine/bearing, relative(), sun position, compass helpers.
 js/cloud.js       Firebase sign-in (Google popup with redirect fallback, email/password, reset) and syncLog() (Firestore transaction on users/{uid}).
 js/firebase-config.js  Firebase web config. Empty apiKey means no accounts: the account button stays hidden and the SDK never loads.
+sw.js             Service worker: shows alert notifications (Android needs one) and focuses the app on a tap. No caching.
+js/tick.js        Worker with a 1 s timer, used to keep alerts running in a hidden tab.
 firestore.rules   Each user reads and writes only users/{uid}, with fields log, profile and at (photo under 200 KB).
 ```
 
@@ -66,7 +68,8 @@ firestore.rules   Each user reads and writes only users/{uid}, with fields log, 
 - **Flights are lat/lon first.** Every flight has `lat`, `lon`, `alt` (km), `spd` (km/s), `vr` (km/s) and `trk` (degrees true). Live flights have no `x`/`z`. `reckon()` moves them with `step()`. Sim flights keep `x`/`z` in the Sim's `Proj` and write `lat`/`lon` every step.
   - Conversions used in `ingest()`: feet `* 0.0003048`, knots `* 0.000514444`, ft/min `* 0.00000508`.
   - Display helpers in `main.js`: `fmtAlt(km)`, `kt(f)`, `fpm(f)`.
-- `relative(f, o)` in `geo.js` gives distance, bearing, elevation and slant range from observer `o` (`{lat0, lon0}`, usually `S.proj`). It is exact on the sphere at any distance. `main.js` wraps it as `rel(f)`.
+- `relative(f, o)` in `geo.js` gives distance, bearing, elevation and slant range from observer `o` (`{lat0, lon0, h}`, usually `S.proj`). It is exact on the sphere at any distance. It uses GNSS altitude (`f.alt + f.dg`, where `ingest()` sets `dg` from `alt_geom - alt_baro`) and the observer's ground height `o.h` (km; `S.proj.h` comes from Open-Meteo's `elevation`). `main.js` wraps it as `rel(f)`.
+- `ingest(list, at)` moves each position on by its age: `seen_pos` plus the feed's lag (`at` is the response's `now` in ms).
 - Rendered altitude is exaggerated by `world.altScale` (2.2 in orbit and map views, 1.0 in ground view, eased between them). `relative()` uses true altitude.
 - **Home vs the rest of the world.** `IN_RANGE = 185` km around home decides what counts: the HUD, board, stats, records, catches, badges and events. Other aircraft are only drawn. A flight is "caught" (`catchFlight`) the first time it comes within range, in `tickRecords()`.
 
@@ -85,12 +88,13 @@ firestore.rules   Each user reads and writes only users/{uid}, with fields log, 
 
 ### Look-ahead, satellites and the hobby layer
 
-- `predictAll()` in `main.js` runs every 2 s over aircraft within about 450 km of home. It sets `f.next` (closest approach), `f.ctr` (contrail state) and `S.pred = { at, over, tr, rare }`, and fires `ping()` alerts once per key (`S.alerted`). Times in `S.pred` are seconds from `S.pred.at`, so subtract the age when displaying.
-- Alerts: `ping()` always shows the dark toast and logs an event; the chime, vibration and system notification only happen when `settings.alerts` is on.
+- `predictAll()` in `main.js` runs every 2 s over aircraft within about 450 km of home. It sets `f.next` (closest approach), `f.ctr` (contrail state) and `S.pred = { at, over, tr, rare }`, and fires `ping()` alerts. Times in `S.pred` are seconds from `S.pred.at`, so subtract the age when displaying.
+- Alerts: `ping()` always shows the dark toast and logs an event; the chime, vibration and system notification only happen when `settings.alerts` is on. A key alerts once per 2 h (`S.alerted` is a Map of key to time, cleared by `setPlace`). In a hidden tab `ping()` calls `notify()` instead of chiming; `notify()` uses the service worker's `showNotification` when `sw.js` is active, else `new Notification`.
+- Hidden tab: rAF stops and page timers slow to once a minute. With alerts on, `bgSync()` starts the `js/tick.js` worker and `bgTick()` runs `reckon()`, `poll()` (at `pollAt`) and `predictAll()`. `region()` asks for home every 10 s while hidden. With alerts off, `poll()` doesn't schedule itself while hidden, and `visibilitychange` polls on return.
 - Transit lines are drawn by `world.setTransitLines()` in the home group. The contrail forecast needs the pressure-level fields in `S.weather.levels` (`fetchWeather()` in `data.js`).
 - Satellites: `startSats()` loads after the intro; `tickSats()` refreshes positions each second and passes every 30 min; `world.syncSats()` extrapolates between fixes. Satellite coordinates are converted from satellite.js ECF (x lon 0, y lon 90E, z north) to the globe frame (x = ecf.y, y = ecf.z, z = ecf.x).
-- Location: `settings.placeSrc` is `gps`, `pick` or `''`. Until it's set, boot starts at `tzGuess()` and `bootLocate()` shows the `#welcome` card after the loader. With geolocation already granted and a home that isn't a picked place, boot moves home quietly when you're more than 3 km away.
-- Compass and sky camera: `lookText()`/`paintCompass()` drive the card's compass (heading-up when `headingNow()` has a fresh north-tied heading). `openAR()`/`updateAR()` run the full-screen camera; while `ar.on`, `tick()` skips drawing the 3D world. Tags use `rel(f)` from home, so they only line up when the viewer stands at home. `sense.nudge` (saved as `settings.nudge`) is the viewer's drag correction. Both only show on `(pointer: coarse)` devices.
+- Location: `settings.placeSrc` is `gps`, `pick` or `''`. Until it's set, boot starts at `tzGuess()` and `bootLocate()` shows the `#welcome` card after the loader. With geolocation already granted, every visit starts at your current position (even after a picked place), and `followMe()` keeps a `watchPosition` running. `movedTo()` ignores moves under 0.3 km, shifts home in place for moves up to 25 km (flights, camera and log stay; weather, name and satellite passes reload after 5 km, tracked by `homeAt`), and calls `setPlace()` beyond that. Picking a place (`setPlace(..., 'pick')`) stops following until the next visit or "Use my location".
+- Compass and sky camera: `lookText()`/`paintCompass()` drive the card's compass (heading-up when `headingNow()` has a fresh north-tied heading). `openAR()`/`updateAR()` run the full-screen camera; while `ar.on`, `tick()` skips drawing the 3D world. Tags use `arRel(f)`: a live `watchPosition` fix (`ar.obs`, only when location is already allowed, and within 60 km of home), else home. `sense.nudge` (saved as `settings.nudge`) is the viewer's drag correction. Both only show on `(pointer: coarse)` devices.
 - Hobby layer: `gain(xp)`, `mission(event)`, `dayRec()` and `sawIt(f)` live in `main.js`; the numbers and definitions are in `spotter.js`. The log (`squawk.log.v2`) now also has `xp`, `seen`, `seenTypes`, `days` and `day`. The first-sighting guide (`coach*`) runs once per browser (`squawk.coach`), and only when a plane is 8° to 75° up within 50 km.
 
 ### Rendering (`js/world.js`, `js/globe.js`)
