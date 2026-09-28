@@ -510,6 +510,7 @@ function followView() {
 // On the first load the camera starts in space above home; later moves fly there.
 function setPlace(p, boot, src) {
   settings.place = { name: p.name, lat: p.lat, lon: p.lon }; if (src) { settings.placeSrc = src; $('welcome').hidden = true; } saveSettings();
+  if (src === 'pick') stopFollowMe(); homeAt = { lat: p.lat, lon: p.lon };
   S.proj = new Proj(p.lat, p.lon); $('placeName').textContent = p.name;
   const back = 'Back to ' + p.name.split(',')[0]; $('recenterBtn').dataset.tip = back; $('recenterBtn').setAttribute('aria-label', back + ' (H)');
   world.setHome(p.lat, p.lon); world.setAirports(D.AIRPORTS, S.proj);
@@ -933,7 +934,7 @@ $('geoBtn').onclick = async () => { if (await useMyLocation($('geoBtn'), m => { 
 
 /* ---------------- your location ---------------- */
 // Everyone starts with a guess from their time zone, then gets asked once per visit until they share a location or pick a place.
-// With location already allowed, a returning visitor is quietly moved to where they are now.
+// With location allowed, every visit starts where you are, and home follows you as you move (followMe).
 function tzGuess() {
   try {
     const city = (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop().replace(/_/g, ' ').replace('Calcutta', 'Kolkata');
@@ -948,14 +949,37 @@ async function geoState() {
   if (!navigator.geolocation) return 'none';
   try { return (await navigator.permissions.query({ name: 'geolocation' })).state; } catch (e) { return 'prompt'; }
 }
-const locate = () => new Promise((ok, no) => navigator.geolocation.getCurrentPosition(p => ok({ lat: p.coords.latitude, lon: p.coords.longitude }), no, { enableHighAccuracy: false, timeout: 15000, maximumAge: 300000 }));
+const locate = () => new Promise((ok, no) => navigator.geolocation.getCurrentPosition(p => ok({ lat: p.coords.latitude, lon: p.coords.longitude }), no, { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 }));
+// Home follows you while location is on: a short move shifts it in place (planes, camera and log stay), a long one
+// (you've travelled) moves home properly. Picking a place stops it until the next visit or "Use my location".
+let followId = null, homeAt = null; // homeAt: where the weather, name and passes were last loaded
+function followMe() {
+  if (followId != null || !navigator.geolocation || !window.isSecureContext) return;
+  followId = navigator.geolocation.watchPosition(p => { const c = p.coords; if (c.accuracy <= 1500) movedTo(c.latitude, c.longitude); },
+    () => { /* no fix: home stays put */ }, { enableHighAccuracy: false, maximumAge: 30000, timeout: 60000 });
+}
+function stopFollowMe() { if (followId != null) navigator.geolocation.clearWatch(followId); followId = null; }
+async function movedTo(lat, lon) {
+  if (settings.placeSrc !== 'gps') return;
+  const d = haversine(S.proj.lat0, S.proj.lon0, lat, lon);
+  if (d < 0.3) return;
+  if (d > 25) { setPlace({ name: await D.reverseGeocode(lat, lon), lat, lon }, !loaderDone, 'gps'); return; }
+  const h = S.proj.h; S.proj = new Proj(lat, lon); S.proj.h = h;
+  settings.place = { ...settings.place, lat, lon }; saveSettings();
+  world.setHome(lat, lon); world.setAirports(D.AIRPORTS, S.proj); updateSun();
+  if (haversine(homeAt.lat, homeAt.lon, lat, lon) > 5) {
+    homeAt = { lat, lon }; satPredT = 0; loadWeather();
+    const name = await D.reverseGeocode(lat, lon);
+    if (name && S.proj.lat0 === lat && S.proj.lon0 === lon) { settings.place.name = name; saveSettings(); $('placeName').textContent = name; }
+  }
+}
 async function useMyLocation(btn, fail) {
   if (!window.isSecureContext) { fail('Browsers only share your location with secure (https) sites. Open Squawk from its https link, or search for your town.'); return false; }
   if (!navigator.geolocation) { fail('This browser can\'t share its location. Search for your town instead.'); return false; }
   const lbl = btn.lastChild.textContent; btn.disabled = true; btn.lastChild.textContent = 'Finding you…';
   try {
     const c = await locate(), name = await D.reverseGeocode(c.lat, c.lon);
-    setPlace({ name, lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); return true;
+    setPlace({ name, lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); followMe(); return true;
   } catch (err) {
     fail(err.code === 1 ? 'Location access is blocked for this site. Allow it in your browser\'s site settings, or search for your town.' : 'Couldn\'t get your location just now. Try again, or search for your town.'); return false;
   } finally { btn.disabled = false; btn.lastChild.textContent = lbl; }
@@ -963,11 +987,12 @@ async function useMyLocation(btn, fail) {
 let welcomeDue = false;
 async function bootLocate() {
   const st = await geoState();
-  if (st === 'granted' && settings.placeSrc !== 'pick') {
+  if (st === 'granted') { // every visit starts where you are, even after a picked place
     try {
-      const c = await locate(), h = settings.place;
-      if (settings.placeSrc === 'gps' && haversine(h.lat, h.lon, c.lat, c.lon) < 3) return; // still at home
-      setPlace({ name: await D.reverseGeocode(c.lat, c.lon), lat: c.lat, lon: c.lon }, !loaderDone, 'gps'); return;
+      const c = await locate();
+      if (settings.placeSrc === 'gps') movedTo(c.lat, c.lon);
+      else setPlace({ name: await D.reverseGeocode(c.lat, c.lon), lat: c.lat, lon: c.lon }, !loaderDone, 'gps');
+      followMe(); return;
     } catch (e) { /* fall through and ask */ }
   }
   if (settings.placeSrc) return;
