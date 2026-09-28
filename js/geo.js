@@ -80,12 +80,13 @@ export function bearing(lat1, lon1, lat2, lon2) {
   return (Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) * R2D + 360) % 360;
 }
 
-/** Position of an aircraft relative to an observer o ({lat0, lon0}): ground distance, bearing, elevation angle, slant range. Exact on a spherical earth. */
+/** Position of an aircraft relative to an observer o ({lat0, lon0, h}): ground distance, bearing, elevation angle, slant range. Exact on a spherical earth.
+ *  Heights: the aircraft's GNSS altitude when known (f.dg is its offset from the barometric one), and the observer's ground height o.h, in km. */
 export function relative(f, o) {
-  const d = haversine(o.lat0, o.lon0, f.lat, f.lon), th = d / EARTH_R, rh = EARTH_R + f.alt;
+  const d = haversine(o.lat0, o.lon0, f.lat, f.lon), th = d / EARTH_R, rh = EARTH_R + Math.max(0, f.alt + (f.dg || 0)), ro = EARTH_R + (o.h || 0);
   const brg = bearing(o.lat0, o.lon0, f.lat, f.lon);
-  const elev = Math.atan2(rh * Math.cos(th) - EARTH_R, Math.max(rh * Math.sin(th), 1e-5)) * R2D;
-  return { d, brg, elev, slant: Math.sqrt(Math.max(0, rh * rh + EARTH_R * EARTH_R - 2 * EARTH_R * rh * Math.cos(th))) };
+  const elev = Math.atan2(rh * Math.cos(th) - ro, Math.max(rh * Math.sin(th), 1e-5)) * R2D;
+  return { d, brg, elev, slant: Math.sqrt(Math.max(0, rh * rh + ro * ro - 2 * ro * rh * Math.cos(th))) };
 }
 
 /** Move a lat/lon point dist km along track trk (degrees). Flat step, fine for the short hops of dead reckoning. */

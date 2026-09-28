@@ -376,20 +376,25 @@ const staleAfter = () => Math.max(40, (S.region?.ms || POLL_MS) / 1000 * 2.5);
 // feed values are checked, not trusted: a bad number would put NaN into the camera, a non-string would throw mid-batch
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : typeof v === 'number' && Number.isFinite(v) ? String(v).slice(0, n) : '');
-function ingest(list) {
-  const now = performance.now() / 1000;
+// Positions arrive a few seconds old: the feed's own age (now, in ms) plus each aircraft's seen_pos. Move each one on by that
+// much so it's drawn where it is now, not where it was, which matters when you hold a phone up to it.
+function ingest(list, at) {
+  const now = performance.now() / 1000, lag = at ? clamp((Date.now() - at) / 1000, 0, 15) : 0;
   if (list.length > 20000) list = list.slice(0, 20000);
   for (const a of list) {
     if (!a || typeof a !== 'object' || a.alt_baro === 'ground') continue;
     const lat = num(a.lat), lon = num(a.lon), hex = str(a.hex, 12).toLowerCase();
     if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180 || !hex) continue;
-    const ft = num(a.alt_baro) ?? num(a.alt_geom);
+    const ft = num(a.alt_baro) ?? num(a.alt_geom), gft = num(a.alt_geom);
     if (ft == null || ft > 200000) continue;
     const id = 'h' + hex, cs = str(a.flight, 10), reg = str(a.r, 12);
     const d = { hex, lat, lon, alt: Math.max(0, ft * 0.0003048), spd: clamp(num(a.gs) ?? 0, 0, 2500) * 0.000514444,
       vr: clamp(num(a.baro_rate) ?? num(a.geom_rate) ?? 0, -20000, 20000) * 0.00000508, squawk: str(a.squawk, 4), type: str(a.t, 6).toUpperCase(), desc: str(a.desc, 60), reg,
       cat: str(a.category, 2), callsign: cs || reg || hex.toUpperCase(), lastFix: now, kind: 'live', mil: !!(a.dbFlags & 1), odd: !!(a.dbFlags & 2) };
     const trk = num(a.track) ?? num(a.true_heading) ?? num(a.mag_heading);
+    if (gft != null && num(a.alt_baro) != null) d.dg = clamp((gft - ft) * 0.0003048, -1.5, 1.5); // GNSS minus pressure altitude, for true look angles
+    const age = clamp(num(a.seen_pos) ?? 0, 0, 30) + lag;
+    if (age > 0.2 && trk != null) { step(d, trk, d.spd * age); d.alt = Math.max(0, d.alt + d.vr * Math.min(age, 10)); }
     const f = S.flights.get(id);
     if (!f) addFlight({ id, trk: trk ?? 0, turn: 0, ...d });
     else { const was = f.emg, ty = f.type; Object.assign(f, d); if (trk != null) f.trk = trk; f.emg = D.isEmergency(f); if (f.emg && !was) emergency(f); if (ty !== f.type) dress(f); }
@@ -442,10 +447,10 @@ async function poll(gen) {
   const reg = S.region = region();
   let wait = reg.ms;
   try {
-    const { list, provider } = await D.fetchAircraft(reg.lat, reg.lon, reg.nm);
+    const { list, provider, now: at } = await D.fetchAircraft(reg.lat, reg.lon, reg.nm);
     if (gen !== feedGen) return;
-    if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; S.booting = true; ingest(list); S.booting = false; }
-    else ingest(list);
+    if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; S.booting = true; ingest(list, at); S.booting = false; }
+    else ingest(list, at);
     S.provider = provider; fails = 0; setFeed('live', 'Live · ' + provider);
   } catch (e) {
     if (gen !== feedGen) return;
@@ -481,7 +486,7 @@ function setPlace(p, boot, src) {
 }
 async function loadWeather() {
   const at = S.proj;
-  try { const w = await D.fetchWeather(at.lat0, at.lon0); if (at !== S.proj) return; S.weather = w; world.setWeather(w); }
+  try { const w = await D.fetchWeather(at.lat0, at.lon0); if (at !== S.proj) return; S.weather = w; world.setWeather(w); if (Number.isFinite(w.elevation)) at.h = clamp(w.elevation, -500, 6000) / 1000; }
   catch (e) { if (at !== S.proj) return; world.setWeather(null); }
   if (S.tab === 'weather') renderPanel(true);
   updateSun();
@@ -705,8 +710,17 @@ $('cAR').onclick = () => openAR(S.selId);
 
 /* ---------------- sky camera ---------------- */
 // Point the phone at the sky: the camera fills the screen and every aircraft in range gets a tag where it really is.
-// Tags use true angles from home, so they line up when you stand at home. Drag sideways to fix a compass that's off.
-const ar = { on: false, cam: null, pick: null, aim: null, pool: [], drag: null, infoT: 0, infoId: undefined, err: '' };
+// Tags use true angles from where you stand (a live GPS fix while it's open, else home). Drag sideways to fix a compass that's off.
+const ar = { on: false, cam: null, pick: null, aim: null, pool: [], drag: null, infoT: 0, infoId: undefined, err: '', watch: null, obs: null };
+// where you're standing while the camera is open: a live GPS fix beats home, which can be a few km out (or a picked town)
+function arWatch() {
+  if (ar.watch != null || !navigator.geolocation || !window.isSecureContext) return;
+  ar.watch = navigator.geolocation.watchPosition(p => { const c = p.coords; if (c.accuracy <= 2000) ar.obs = { lat0: c.latitude, lon0: c.longitude, h: S.proj.h || 0, acc: c.accuracy }; },
+    () => { /* no fix: tags stay on home */ }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+}
+const arAway = () => (ar.obs ? haversine(ar.obs.lat0, ar.obs.lon0, S.proj.lat0, S.proj.lon0) : 0);
+const arObs = () => (ar.obs && arAway() < 60 ? ar.obs : S.proj); // further than that, the planes around you aren't loaded
+const arRel = f => relative(f, arObs());
 const AR_MAX = 30, arPt = {};
 async function openAR(id) {
   if (ar.on) return;
@@ -714,6 +728,7 @@ async function openAR(id) {
   ar.on = true; ar.pick = id && S.flights.has(id) ? id : null; ar.aim = null; ar.infoId = undefined; ar.err = '';
   $('ar').hidden = false; $('ar').classList.remove('nocam'); $('arMsg').textContent = 'Starting the camera…';
   togglePop('placePop', 'placeBtn', false); togglePop('layersPop', 'layersBtn', false);
+  geoState().then(st => { if (ar.on && st === 'granted') arWatch(); });
   const [okS, cam] = await Promise.all([sP, cP]);
   if (!ar.on) { stopCam($('arVid'), cam); return; }
   ar.cam = cam; $('ar').classList.toggle('nocam', !cam);
@@ -723,6 +738,7 @@ async function openAR(id) {
 function closeAR() {
   if (!ar.on) return;
   ar.on = false; $('ar').hidden = true; stopCam($('arVid'), ar.cam); ar.cam = null;
+  if (ar.watch != null) navigator.geolocation.clearWatch(ar.watch); ar.watch = null; ar.obs = null;
   if (ar.pick && S.flights.has(ar.pick)) select(ar.pick);
 }
 function arTag(i) {
@@ -732,20 +748,22 @@ function arTag(i) {
 const hzLine = (x1, y1, x2, y2) => { const l = $('arHz'); l.setAttribute('x1', x1); l.setAttribute('y1', y1); l.setAttribute('x2', x2); l.setAttribute('y2', y2); };
 function updateAR() {
   const W = innerWidth, H = innerHeight, now = performance.now(), fresh = sense.live && now - sense.t < 1500;
-  const home = settings.place.name.split(',')[0];
+  const home = settings.place.name.split(',')[0], away = arAway(), far = away >= 60, rough = sense.acc != null && (sense.acc < 0 || sense.acc > 30);
   $('arDir').textContent = fresh ? `Facing ${P16[pt16(sense.heading)]} ${String(Math.round(sense.heading)).padStart(3, '0')}° · ${Math.abs(Math.round(sense.pitch))}° ${sense.pitch < 0 ? 'down' : 'up'}` : 'Sky camera';
   const msg = ar.err || (!fresh ? 'Waiting for the motion sensor…' : !sense.abs ? 'This phone doesn\'t report north. Drag sideways to line the tags up with the planes.'
-    : sense.pitch < -15 ? 'Point your phone up at the sky.' : settings.placeSrc !== 'gps' ? `Tags show the sky from ${home}. Use your location if you're somewhere else.`
+    : sense.pitch < -15 ? 'Point your phone up at the sky.' : far ? `You're ${Math.round(away)} km from ${home}. Use your location to see the planes around you.`
+    : !ar.obs && settings.placeSrc !== 'gps' ? `Tags show the sky from ${home}. Use your location if you're somewhere else.`
+    : rough ? 'The compass is unsure. Wave your phone in a figure of eight, or drag sideways to line the tags up.'
     : S.mode === 'sim' ? 'The live feed is down, so these are simulated planes.' : !inRange().length ? 'No aircraft within 185 km right now.' : '');
   if ($('arMsg').textContent !== msg) $('arMsg').textContent = msg;
-  $('arGeo').hidden = settings.placeSrc === 'gps' || !!ar.err || !fresh; $('arReset').hidden = Math.abs(sense.nudge) < 0.5;
+  $('arGeo').hidden = (settings.placeSrc === 'gps' || !!ar.obs) && !far || !!ar.err || !fresh; $('arReset').hidden = Math.abs(sense.nudge) < 0.5;
   if (!fresh) { for (const el of ar.pool) el.hidden = true; $('arEdge').hidden = true; $('arInfo').hidden = true; hzLine(0, 0, 0, 0); return; }
   const ax = axes(), fp = focal($('arVid'), W, H), hd = sense.heading;
   // horizon: two points on it either side of where you face, stretched across the screen
   const a = toScreen(hd - 10, 0, ax, W, H, fp, {}), b = toScreen(hd + 10, 0, ax, W, H, fp, {});
   if (a.front && b.front) { const dx = b.x - a.x, dy = b.y - a.y, k = (W + H) * 2 / (Math.hypot(dx, dy) || 1); hzLine(a.x - dx * k, a.y - dy * k, a.x + dx * k, a.y + dy * k); } else hzLine(0, 0, 0, 0);
   // tags, nearest first; the one nearest the middle of the screen is the one you're aiming at
-  const list = inRange().filter(o => o.r.elev > -1 || o.f.id === ar.pick).sort((p, q) => p.r.slant - q.r.slant), shown = [];
+  const list = inRange().map(({ f }) => ({ f, r: arRel(f) })).filter(o => o.r.elev > -1 || o.f.id === ar.pick).sort((p, q) => p.r.slant - q.r.slant), shown = [];
   let aim = null, ad = (Math.min(W, H) * 0.18) ** 2, pickOn = false;
   for (const { f, r } of list) {
     toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
@@ -776,7 +794,7 @@ function updateAR() {
   // the plane you tapped, when it's off the screen: an arrow at the edge showing which way to turn
   const pf = ar.pick && S.flights.get(ar.pick);
   if (pf && !pickOn) {
-    const r = rel(pf); toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
+    const r = arRel(pf); toScreen(r.brg, r.elev, ax, W, H, fp, arPt);
     let dx = arPt.dx, dy = arPt.dy; if (!arPt.front && Math.hypot(dx, dy) < 0.2) { dx = wrap(r.brg - hd) > 0 ? 1 : -1; dy = 0; }
     const ang = Math.atan2(dy, dx), ex = W / 2 + Math.cos(ang) * (W / 2 - 70), ey = H / 2 + Math.sin(ang) * (H / 2 - 130);
     $('arEdge').hidden = false; $('arEdge').style.transform = `translate(${ex.toFixed(0)}px,${ey.toFixed(0)}px) translate(-50%,-50%)`;
@@ -790,7 +808,7 @@ function updateAR() {
 }
 function arInfo(id) {
   const f = id && S.flights.get(id); $('arInfo').hidden = !f; if (!f) return;
-  const r = rel(f), rt = routeOf(f), al = D.airlineName(f.callsign) || rt?.airline || '';
+  const r = arRel(f), rt = routeOf(f), al = D.airlineName(f.callsign) || rt?.airline || '';
   if (f.kind === 'live') D.wantRoutes([f.callsign]);
   $('arAl').textContent = [id === ar.pick ? 'Tracking' : 'You\'re pointing at', al].filter(Boolean).join(' · ');
   $('arCall').textContent = f.callsign;
@@ -803,7 +821,7 @@ $('arBtn').onclick = () => openAR(S.selId);
 $('arClose').onclick = e => { e.stopPropagation(); closeAR(); };
 $('arMore').onclick = e => { e.stopPropagation(); ar.pick = ar.pick || ar.aim; closeAR(); };
 $('arSaw').onclick = e => { e.stopPropagation(); const f = S.flights.get(ar.pick || ar.aim); if (f) { sawIt(f); ar.infoT = 0; } };
-$('arGeo').onclick = e => { e.stopPropagation(); useMyLocation($('arGeo'), m => { ar.err = m; setTimeout(() => { ar.err = ''; }, 6000); }); };
+$('arGeo').onclick = async e => { e.stopPropagation(); if (await useMyLocation($('arGeo'), m => { ar.err = m; setTimeout(() => { ar.err = ''; }, 6000); }) && ar.on) arWatch(); };
 $('arReset').onclick = e => { e.stopPropagation(); sense.nudge = 0; settings.nudge = 0; saveSettings(); };
 // tap a tag to track it, tap the sky to let go; drag sideways to turn the tags if the compass is off
 $('ar').addEventListener('pointerdown', e => { if (e.target.closest('button,.ar-info')) return; ar.drag = { x: e.clientX, id: e.pointerId, moved: false }; });
@@ -1428,7 +1446,7 @@ function tick(dt) {
 }
 
 // console hooks for debugging; step(n) runs n frames by hand, which also works while the tab is in the background
-window.__squawk = { world, S, ingest: list => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list); },
+window.__squawk = { world, S, ingest: (list, at) => { if (S.mode !== 'live') { clearFlights(); S.mode = 'live'; } ingest(list, at); },
   step: (n = 1, dt = 1 / 30) => { for (let i = 0; i < n; i++) { world.clock.elapsedTime += dt; tick(dt); } } };
 $('timeR').value = 0;
 paintLevel();
