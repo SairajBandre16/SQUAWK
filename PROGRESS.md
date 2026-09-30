@@ -87,7 +87,8 @@ _Last updated: 28 Sept 2026_
 
 The first three are the high-priority items from [BUGS.md](BUGS.md):
 
-- [ ] **Transits.** Detect dead-centre crossings reliably, use a better moon formula, and fix the curved-earth centreline for a low sun.
+- [x] Transit hit detection now zooms in around the coarse sample instead of missing crossings between 3 s steps (30 Sept 2026)
+- [ ] **Transits.** Use a better moon formula, and fix the curved-earth centreline for a low sun.
 - [ ] **Phone polish.** Stop iOS zooming into the search input (set the font to 16px), use `dvh` for popovers, and stop toasts and pills overlapping.
 - [ ] **Accessibility.** Remove `aria-live` from the panel and card (it floods screen readers), make Next rows work with the keyboard, and give tabs names.
 - [ ] **Globe view on slow connections.** A timeout should shrink the region instead of dropping into simulated traffic.

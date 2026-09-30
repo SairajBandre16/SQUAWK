@@ -6,7 +6,6 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 
 ## High
 
-- **Transit "hit" misses real dead-centre crossings** (`transits()` in `predict.js`). Sampling every 3 s moves a jet 2 to 14° across the sky between samples, so only about 7 in 30 centreline crossings are flagged. The card can then say "Move 0 m west". Use `move.d < width` for `hit`, or refine around the best sample.
 - **The moon position is off by up to 2.5°** (`moonPosition` in `geo.js`). It uses the short SunCalc series with no evection or variation terms, which is several disc widths. Every moon-transit alert is unreliable until it uses a fuller series (Meeus ch. 47).
 - **The transit centreline is tens of km off with a low sun** (`transits()`). The ground line is flat-earth but the look angles use a curved earth: about 42 km out at 3° sun elevation and 7 km at 6°. There is no refraction either.
 - **iOS zooms the page when place search opens.** The input font is 15px, and iOS zooms any input under 16px. The canvas's `touch-action:none` makes the zoom hard to undo. Set inputs to 16px.
@@ -105,6 +104,10 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 - Phones: the Board LOOK column needs horizontal scrolling, the place button is tiny, and `.hud-bc` blocks globe gestures.
 - `.photo` also matches `body.photo` in photo mode (no visible effect yet).
 - After a place change the old ping stays up to 9 s, old search results stay, and the guide still shows in photo mode.
+
+## Fixed (30 Sept 2026)
+
+- Transit "hit" missed real dead-centre crossings (`transits()` in `predict.js`). Sampling every 3 s moved a jet 2 to 14° across the sky between samples, so only about 7 in 30 centreline crossings were flagged. Now zooms in around the coarse best sample with three shrinking search windows before deciding `hit`/`sep`/the centreline.
 
 ## Fixed (28 Sept 2026)
 
