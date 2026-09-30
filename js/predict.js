@@ -34,14 +34,19 @@ export function transits(flights, o, body, horizon = 600, near = 2) {
   for (const f of flights) {
     const p = local(f, o), s = f.trk * D2R, vx = f.spd * Math.sin(s), vz = -f.spd * Math.cos(s);
     if (Math.hypot(p.x, p.z) > 320) continue;
-    let best = null;
-    for (let t = 0; t <= horizon; t += 3) {
+    const sampleAt = t => {
       const x = p.x + vx * t, z = p.z + vz * t, alt = Math.max(0, f.alt + f.vr * t), L = look(x, z, alt), b = bAt(t);
-      if (L.elev < 1 || b.alt < 1.5) continue;
-      const d = sep(L.elev, L.brg, b.alt, b.az);
-      if (!best || d < best.sep) best = { t, sep: d, x, z, alt, elev: L.elev, brg: L.brg, b };
+      if (L.elev < 1 || b.alt < 1.5) return null;
+      return { t, sep: sep(L.elev, L.brg, b.alt, b.az), x, z, alt, elev: L.elev, brg: L.brg, b };
+    };
+    let best = null;
+    for (let t = 0; t <= horizon; t += 3) { const r = sampleAt(t); if (r && (!best || r.sep < best.sep)) best = r; }
+    if (!best) continue;
+    // the jet can cross 2 to 14° of sky between 3 s samples, so zoom in around the coarse best to find the true closest pass
+    for (let win = 3; win >= 0.03; win /= 10) for (let dt = -win; dt <= win; dt += win / 10) {
+      const r = sampleAt(clamp(best.t + dt, 0, horizon)); if (r && r.sep < best.sep) best = r;
     }
-    if (!best || best.sep > near) continue;
+    if (best.sep > near) continue;
     // centreline: for each moment, the ground point that has the plane exactly in front of the body
     const line = [];
     for (let dt = -40; dt <= 40; dt += 4) {
