@@ -2,7 +2,7 @@
 
 Where Squawk stands and what comes next. Update this file whenever a chunk of work lands. The full list of known bugs is in [BUGS.md](BUGS.md).
 
-_Last updated: 28 Sept 2026_
+_Last updated: 1 Oct 2026_
 
 ## Current state
 
@@ -89,7 +89,7 @@ The first three are the high-priority items from [BUGS.md](BUGS.md):
 
 - [x] Transit hit detection now zooms in around the coarse sample instead of missing crossings between 3 s steps (30 Sept 2026)
 - [ ] **Transits.** Use a better moon formula, and fix the curved-earth centreline for a low sun.
-- [ ] **Phone polish.** Stop iOS zooming into the search input (set the font to 16px), use `dvh` for popovers, and stop toasts and pills overlapping.
+- [x] **Phone polish** (1 Oct 2026). Text inputs are 16px so iOS no longer zooms in, popovers, the card and the panel use `dvh`, the LOOK UP toast, alert and badge stack in one column instead of on top of each other, the "Overhead in" pill stays clear of ⌖ on 320 to 375 px phones, and the recentre button and pill no longer jump when they appear
 - [ ] **Accessibility.** Remove `aria-live` from the panel and card (it floods screen readers), make Next rows work with the keyboard, and give tabs names.
 - [ ] **Globe view on slow connections.** A timeout should shrink the region instead of dropping into simulated traffic.
 - [ ] **Mobile data diet.** Abort the old request when the feed restarts. (Hidden tabs now rest unless alerts are on.)

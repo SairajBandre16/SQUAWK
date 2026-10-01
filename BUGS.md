@@ -8,7 +8,6 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 
 - **The moon position is off by up to 2.5°** (`moonPosition` in `geo.js`). It uses the short SunCalc series with no evection or variation terms, which is several disc widths. Every moon-transit alert is unreliable until it uses a fuller series (Meeus ch. 47).
 - **The transit centreline is tens of km off with a low sun** (`transits()`). The ground line is flat-earth but the look angles use a curved earth: about 42 km out at 3° sun elevation and 7 km at 6°. There is no refraction either.
-- **iOS zooms the page when place search opens.** The input font is 15px, and iOS zooms any input under 16px. The canvas's `touch-action:none` makes the zoom hard to undo. Set inputs to 16px.
 - **Screen readers are flooded.** `aria-live` is set on `#panel` and `#card`, which are rewritten every 0.3 to 3 s.
 - **A slow link in globe view can still fall back to sim.** A 3500 nm request that times out 3 times starts the sim. The sim retry now asks for home, so it recovers, but once live again, zooming out can repeat the cycle. The timeout should shrink the region instead of counting as a failure.
 
@@ -50,7 +49,6 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 - The panel and card cover the recentre button, the "Overhead in" pill and the zoom "+" button on desktop.
 - The LOOK UP toast can't be dismissed, and stays up for good at homes near an airport.
 - On landscape phones the card is almost all photo.
-- Popovers use `100vh`; iOS needs `dvh`.
 
 ## Low
 
@@ -94,16 +92,22 @@ The most urgent issues were fixed straight away (see "Fixed" at the end). Everyt
 - `routeCache`, `photoCache` and `coach.skip` never shrink.
 
 ### UI and accessibility
-- Toasts stack on the same spot on mobile. The "Overhead in" pill overlaps ⌖ on 360 to 375 px phones.
 - Both layouts can show at once after resizing below 760 px, or at exactly 760 px (CSS uses `≤ 760`, JS uses `< 760`).
 - Tabs have no accessible name between 761 and 1100 px. Next rows don't respond to Enter or Space. The feed-status `aria-label` hides the live/sim text. `#toast` has no `role`. There is no focus return on Escape. The time slider has no `aria-valuetext`.
 - "+XP" floats from 0,0 on phones (the level chip is hidden there).
 - Contrast is low: the level chip at 0% (about 1.7:1), `--ink-3` on glass in the day theme, and `.board-foot`.
-- The `pop` animation jumps on `.recenter` and `.next-pill` (the keyframe starts at `translate(-50%)`).
 - Geolocation: plain http on the LAN gets advice the user can't follow, a late result overrides a place picked in the meantime, and the button stays on "Finding you…" if the prompt is ignored.
 - Phones: the Board LOOK column needs horizontal scrolling, the place button is tiny, and `.hud-bc` blocks globe gestures.
 - `.photo` also matches `body.photo` in photo mode (no visible effect yet).
 - After a place change the old ping stays up to 9 s, old search results stay, and the guide still shows in photo mode.
+
+## Fixed (1 Oct 2026)
+
+- iOS zoomed the page when place search opened (inputs were 15px). All `.search` inputs are now 16px.
+- Popovers, the card and the phone panel used `100vh`; they now use `dvh` where supported.
+- The LOOK UP toast, alert ping and badge toast had fixed tops and overlapped on phones. They now sit in one `.toasts` column.
+- The "Overhead in" pill overlapped ⌖ on 360 to 375 px phones. On phones it is now capped to clear the zoom column, and the flight text truncates.
+- The `pop` animation jumped on `.recenter` and `.next-pill`; they use a new `rise` keyframe without the `-50%` shift.
 
 ## Fixed (30 Sept 2026)
 

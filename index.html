@@ -154,8 +154,11 @@
   </div>
 </aside>
 
-<div class="toast" id="toast" hidden><b id="toastHead">LOOK UP</b><span id="toastText"></span></div>
-<div class="badge-toast" id="badgeToast" hidden></div>
+<div class="toasts">
+  <div class="toast" id="toast" hidden><b id="toastHead">LOOK UP</b><span id="toastText"></span></div>
+  <div class="ping" id="ping" hidden role="status"><b id="pingHead"></b><span id="pingText"></span></div>
+  <div class="badge-toast" id="badgeToast" hidden></div>
+</div>
 <div class="hint" id="hint" hidden></div>
 <div class="coach" id="coach" hidden role="dialog" aria-label="Your first sighting">
   <p class="coach-h">Your first sighting</p>
@@ -167,7 +170,6 @@
   <p class="coach-t" id="welT"></p>
   <div class="coach-b"><button class="btn primary" id="welGeo"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/></svg>Use my location</button><button class="btn" id="welPick">Search a place</button><button class="btn ghost" id="welLater">Not now</button></div>
 </div>
-<div class="ping" id="ping" hidden role="status"><b id="pingHead"></b><span id="pingText"></span></div>
 
 <div class="hud-bl">
   <div class="ro"><p class="k">In range</p><p class="v" id="rCount">0</p><p class="s" id="rCountS">aircraft within 185 km</p></div>
